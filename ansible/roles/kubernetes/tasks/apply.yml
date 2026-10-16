@@ -1,0 +1,17 @@
+---
+- name: Ensure kubernetes applications directory exists
+  file:
+    path: "{{ kube_application_dir }}"
+    state: directory
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: True
+
+- name: Apply kubernetes applications
+  vars:
+    kube_application: "{{ item.name }}"
+    kube_enabled: "{{ item.enabled }}"
+  include_role:
+    role: kubectl-apply
+  loop: "{{ kube_applications }}"
+
+- include_tasks: addons.yml

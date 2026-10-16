@@ -1,0 +1,94 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pixiu-autoscaler
+  namespace: pixiu-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pixiu-autoscaler
+rules:
+- apiGroups:
+  - "*"
+  resources:
+  - horizontalpodautoscalers
+  - deployments
+  - events
+  - endpoints
+  - leases
+  - configmaps
+  verbs:
+  - get
+  - watch
+  - create
+  - delete
+  - update
+  - list
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pixiu-autoscaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pixiu-autoscaler
+subjects:
+- kind: ServiceAccount
+  name: pixiu-autoscaler
+  namespace: pixiu-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pixiu-autoscaler-controller
+  namespace: pixiu-system
+  labels:
+    pixiu.hpa.controller: pixiu-autoscaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      pixiu.hpa.controller: pixiu-autoscaler
+  template:
+    metadata:
+      labels:
+        pixiu.hpa.controller: pixiu-autoscaler
+    spec:
+      serviceAccountName: pixiu-autoscaler
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: "kubernetes.io/hostname"
+              labelSelector:
+                matchExpressions:
+                - key: pixiu.hpa.controller
+                  operator: In
+                  values:
+                  - pixiu-autoscaler
+      containers:
+      - name: pixiu-autoscaler-controller
+        image: {{ app_image_repository }}/pixiu-autoscaler-controller:latest
+        imagePullPolicy: IfNotPresent
+        command:
+        - pixiu-autoscaler-controller
+        resources:
+          requests:
+            cpu: 100m
+            memory: 90Mi
+        livenessProbe:
+          failureThreshold: 8
+          httpGet:
+            host: 127.0.0.1
+            path: /healthz
+            port: 10256
+            scheme: HTTP
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 15

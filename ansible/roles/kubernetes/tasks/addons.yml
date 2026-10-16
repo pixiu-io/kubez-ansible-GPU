@@ -1,0 +1,21 @@
+---
+- name: Apply helm3 command immediately for master nodes(the default timeout is 600s)
+  script: setup_helm.sh "{{ kubez_namespace }}"
+  changed_when: false
+  when:
+    - enable_helm | bool
+    - inventory_hostname in groups['kube-master']
+
+# Use helm-apply role to install helm chart applications
+- name: Install chart applications by helm-apply
+  include_role:
+    role: helm-apply
+  vars:
+    name: "{{ charts[item.name].name }}"
+    namespace: "{{ charts[item.name].namespace }}"
+    repository: "{{ charts[item.name].repository }}"
+    chart: "{{ charts[item.name].chart }}"
+    chart_extra_vars: "{{ charts[item.name].chart_extra_vars }}"
+    chart_extra_flags: "{{ charts[item.name].chart_extra_flags if charts[item.name].chart_extra_flags is defined else [] }}"
+    chart_enabled: "{{ item.enabled }}"
+  loop: "{{ enable_charts }}"

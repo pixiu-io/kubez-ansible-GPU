@@ -1,0 +1,177 @@
+---
+- name: Install dependent packages for kubernetes nodes
+  package:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - "{{ common_dependent_packages }}"
+  when:
+    - inventory_hostname in groups['kubernetes']
+
+# nfs 工具按包管理器安装，不绑定具体发行版名
+- name: Install nfs utils packages
+  package:
+    name: "{{ item }}"
+    state: present
+    use: "{{ ansible_pkg_mgr }}"
+  loop: "{{ ['rpcbind', 'nfs-kernel-server'] if ansible_pkg_mgr == 'apt' else ['rpcbind', 'nfs-utils'] }}"
+  when:
+    - enable_nfs | bool
+    - inventory_hostname in groups['storage']
+    - ansible_pkg_mgr in ['apt', 'yum', 'dnf']
+
+- name: Install haproxy and keepalived
+  package:
+    name:
+      - haproxy
+      - keepalived
+    state: present
+  when:
+    - enable_haproxy | bool
+    - inventory_hostname in groups['haproxy']
+
+# kube 包按包管理器安装：apt 用 =version，yum/dnf 用 -version
+- name: Install kubernetes packages
+  block:
+    - name: Fail when package manager is unsupported for kubernetes packages
+      fail:
+        msg: >-
+          安装 kubernetes 包仅支持 apt / yum / dnf，当前 ansible_pkg_mgr={{ ansible_pkg_mgr }}
+          (ansible_distribution={{ ansible_distribution }})
+      when:
+        - ansible_pkg_mgr not in ['apt', 'yum', 'dnf']
+
+    - name: Install kubernetes and its indepent packages
+      package:
+        name: "{{ item }}"
+        state: present
+        use: "{{ ansible_pkg_mgr }}"
+      loop: "{{ kube_packages_apt if ansible_pkg_mgr == 'apt' else kube_packages_rpm }}"
+
+    # Somethings service module invoke enable command failed,
+    # but I do not know the reason, use shell module to avoid.
+    # The failed message is like:
+    # "Could not find the requested service kubelet: host"
+    - name: Enable kubelet service
+      shell: systemctl enable kubelet
+      changed_when: false
+  when:
+    - inventory_hostname in groups['kubernetes']
+
+- name: Install docker runtime for kubernetes
+  package:
+    name: "{{ docker_package_apt if ansible_pkg_mgr == 'apt' else docker_package_rpm }}"
+    state: present
+    use: "{{ ansible_pkg_mgr }}"
+  when:
+    - inventory_hostname in groups['docker-master'] or
+      inventory_hostname in groups['docker-node']
+    - ansible_pkg_mgr in ['apt', 'yum', 'dnf']
+
+- name: Install containerd runtime for kubernetes
+  package:
+    name: "{{ containerd_package_ubuntu if ansible_distribution == 'Ubuntu' else (containerd_package_apt if ansible_pkg_mgr == 'apt' else containerd_package_rpm) }}"
+    state: present
+    use: "{{ ansible_pkg_mgr }}"
+  when:
+    - inventory_hostname in groups['containerd-master'] or
+      inventory_hostname in groups['containerd-node']
+    - ansible_pkg_mgr in ['apt', 'yum', 'dnf']
+
+- name: Ensure /etc/docker directories exists
+  file:
+    path: /etc/docker
+    state: directory
+  when:
+    - inventory_hostname in groups['docker-master'] or
+      inventory_hostname in groups['docker-node']
+
+- name: Copy docker daemon jsons
+  template:
+    src: kube-daemon.json.j2
+    dest: /etc/docker/daemon.json
+  when:
+    - inventory_hostname in groups['docker-master'] or
+      inventory_hostname in groups['docker-node']
+  notify:
+    - Restart docker service
+
+- name: Ensure /etc/containerd directories exists
+  file:
+    path: /etc/containerd
+    state: directory
+  when:
+    - inventory_hostname in groups['containerd-master'] or
+      inventory_hostname in groups['containerd-node']
+
+- name: Configure custom containerd registry certificates
+  block:
+    - name: Set containerd custom registry fact
+      set_fact:
+        containerd_custom_registry: "{{ image_repository | regex_replace('^https?://', '') | regex_replace('/.*$', '') }}"
+
+    - name: Ensure custom registry certs.d directory exists
+      file:
+        path: "/etc/containerd/certs.d/{{ containerd_custom_registry }}"
+        state: directory
+        mode: "0755"
+
+    - name: Copy custom registry hosts.toml
+      copy:
+        dest: "/etc/containerd/certs.d/{{ containerd_custom_registry }}/hosts.toml"
+        content: |
+          server = "http://{{ containerd_custom_registry }}"
+
+          [host."http://{{ containerd_custom_registry }}"]
+            capabilities = ["pull", "resolve", "push"]
+        mode: "0644"
+  when:
+    - enable_custom_repo | bool
+    - inventory_hostname in groups['containerd-master'] or
+      inventory_hostname in groups['containerd-node']
+
+- name: Get the containerd sandbox image
+  kube_toolbox:
+    module_name: kubeadm
+    module_args: "config images list"
+    module_extra_vars:
+      image-repository: "{{ image_repository }}"
+      kubernetes-version: "{{ kubernetes_version }}"
+  register: sandbox_result
+  when:
+    - inventory_hostname in groups['kubernetes']
+
+- name: Copy containerd config.toml
+  vars:
+    sandbox_image: "{{ sandbox_result['result']['sandbox_image'] }}"
+  template:
+    src: config.toml.j2
+    dest: /etc/containerd/config.toml
+  when:
+    - inventory_hostname in groups['containerd-master'] or
+      inventory_hostname in groups['containerd-node']
+  notify:
+    - Restart containerd service
+
+- name: Check docker service status
+  service_check:
+    service_name: docker
+    service_type: systemd
+  when:
+    - inventory_hostname in groups['docker-master'] or
+      inventory_hostname in groups['docker-node']
+  notify:
+    - Restart docker service
+
+- name: Check containerd service status
+  service_check:
+    service_name: containerd
+    service_type: systemd
+  when:
+    - inventory_hostname in groups['containerd-master'] or
+      inventory_hostname in groups['containerd-node']
+  notify:
+    - Restart containerd service
+
+- name: Flush handlers
+  meta: flush_handlers

@@ -1,0 +1,4 @@
+---
+features:
+  - Implement 'NGINX Ingress Controller', 'flannel', 'calico', 'metrics_server',
+    'nfs_provisioner', and 'dashboard' supported.
