@@ -654,6 +654,8 @@ kubez-ansible -i multinode bootstrap-servers
 - 校验 containerd 版本 >= `containerd_min_version`
 - 停止并禁用 `ufw`
 
+> 若节点预装了 Ubuntu 发行版 `containerd`，`containerd` 与 `containerd.io` 可能触发包冲突；先用 `apt -s remove containerd` 做 dry-run，再按 6.3 处理。干净节点无此问题。
+
 预期结尾（示例）：
 
 ```text
