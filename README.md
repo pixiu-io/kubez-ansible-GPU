@@ -1,6 +1,6 @@
 # Kubez-ansible-GPU
 
-`kubez-ansible-gpu` 是面向 **NVIDIA RTX 4090 + Ubuntu 22.04 LTS** 的 [kubez-ansible](https://github.com/pixiu-io/kubez-ansible) 定制分支，用于部署 Kubernetes 集群；GPU 软件栈按文档手工接入。
+`kubez-ansible-GPU` 是面向 **NVIDIA RTX 4090 + Ubuntu 22.04 LTS** 的 [kubez-ansible](https://github.com/pixiu-io/kubez-ansible) 定制分支，用于部署 Kubernetes 集群；GPU 软件栈按文档手工接入。
 
 ![Build Status][build-url]
 [![License][license-image]][license-url]

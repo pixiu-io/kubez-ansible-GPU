@@ -30,7 +30,7 @@
 
 ### 2.1 能力边界
 
-本仓库（kubez-ansible-gpu）负责：
+本仓库（kubez-ansible-GPU）负责：
 
 - 主机初始化：依赖包、防火墙服务处置（Ubuntu 上停止并禁用 `ufw`）、内核模块与 sysctl（deploy 阶段）
 - 容器运行时安装：Ubuntu 上默认安装发行版 `containerd` 包并下发 `config.toml`
