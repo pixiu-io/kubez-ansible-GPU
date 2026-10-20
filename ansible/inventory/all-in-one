@@ -19,6 +19,10 @@ containerd-node
 [storage]
 localhost       ansible_connection=local
 
+# GPU 节点（启用 enable_gpu 时填写）
+[gpu]
+# localhost
+
 [baremetal:children]
 kube-master
 kube-node

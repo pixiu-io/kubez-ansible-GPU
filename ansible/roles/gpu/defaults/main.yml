@@ -1,0 +1,14 @@
+---
+# GPU 自动化总开关，默认关闭；启用前需在 inventory 中配置 [gpu] 组
+enable_gpu: "no"
+# 是否由本角色安装 NVIDIA 驱动；已有驱动的节点保持 "no"
+gpu_driver_install: "no"
+gpu_driver_package: "nvidia-driver-580-open"
+gpu_driver_min_version: "525"
+containerd_min_version: "2.0.0"
+gpu_toolkit_version: ""
+gpu_device_plugin_version: "0.20.0"
+gpu_device_plugin_namespace: "kube-system"
+gpu_smoke_test: "no"
+gpu_expected_model: "4090"
+gpu_smoke_image: "nvidia/cuda:12.8.1-base-ubuntu22.04"

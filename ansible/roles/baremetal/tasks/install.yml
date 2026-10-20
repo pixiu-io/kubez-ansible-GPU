@@ -78,6 +78,35 @@
       inventory_hostname in groups['containerd-node']
     - ansible_pkg_mgr in ['apt', 'yum', 'dnf']
 
+- name: Get containerd version
+  command: containerd --version
+  register: containerd_version_result
+  changed_when: false
+  failed_when: false
+  when:
+    - inventory_hostname in groups['containerd-master'] or
+      inventory_hostname in groups['containerd-node']
+    - ansible_pkg_mgr in ['apt', 'yum', 'dnf']
+    - not ansible_check_mode
+
+- name: Assert containerd version meets minimum
+  assert:
+    that:
+      - >-
+        (containerd_version_result.stdout | default('', true)
+        | regex_search('[0-9]+\.[0-9]+\.[0-9]+') | default('0.0.0', true))
+        is version(containerd_min_version, '>=')
+    fail_msg: >-
+      containerd 版本不满足要求：{{ containerd_version_result.stdout | default('未检测到 containerd --version 输出', true) }}。
+      K8s 1.36+ 需要 containerd >= {{ containerd_min_version }}。Ubuntu 22.04 发行版自带的 containerd 常见为 1.6.x，
+      请安装 Docker 仓库的 containerd.io 2.x，并在 globals.yml 中用 containerd_release 固定版本。
+    success_msg: "containerd 版本检查通过（>= {{ containerd_min_version }}）"
+  when:
+    - inventory_hostname in groups['containerd-master'] or
+      inventory_hostname in groups['containerd-node']
+    - ansible_pkg_mgr in ['apt', 'yum', 'dnf']
+    - not ansible_check_mode
+
 - name: Ensure /etc/docker directories exists
   file:
     path: /etc/docker
@@ -98,8 +127,12 @@
 
 - name: Ensure /etc/containerd directories exists
   file:
-    path: /etc/containerd
+    path: "{{ item }}"
     state: directory
+    mode: "0755"
+  loop:
+    - /etc/containerd
+    - /etc/containerd/conf.d
   when:
     - inventory_hostname in groups['containerd-master'] or
       inventory_hostname in groups['containerd-node']

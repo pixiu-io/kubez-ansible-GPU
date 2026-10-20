@@ -1,0 +1,179 @@
+---
+- name: Run nvidia-smi on GPU nodes
+  command: nvidia-smi
+  register: gpu_verify_smi
+  changed_when: false
+  failed_when: false
+
+- name: Get containerd version on GPU nodes
+  command: containerd --version
+  register: gpu_verify_containerd
+  changed_when: false
+  failed_when: false
+
+- name: Read containerd config version on GPU nodes
+  command: grep -E "^version = 3" /etc/containerd/config.toml
+  register: gpu_verify_config_version
+  changed_when: false
+  failed_when: false
+
+- name: Read SystemdCgroup setting on GPU nodes
+  command: grep SystemdCgroup /etc/containerd/config.toml
+  register: gpu_verify_systemd_cgroup
+  changed_when: false
+  failed_when: false
+
+- name: Assert the GPU runtime stack on GPU nodes
+  vars:
+    gpu_verify_containerd_version: >-
+      {{ gpu_verify_containerd.stdout | default('', true)
+         | regex_search('[0-9]+\.[0-9]+\.[0-9]+') | default('0.0.0', true) }}
+  assert:
+    that:
+      - gpu_verify_smi.rc | default(1) == 0
+      - gpu_verify_containerd.rc | default(1) == 0
+      - gpu_verify_containerd_version is version(containerd_min_version | default('2.0.0'), '>=')
+      - gpu_verify_config_version.rc | default(1) == 0
+      - gpu_verify_systemd_cgroup.rc | default(1) == 0
+      - "'true' in (gpu_verify_systemd_cgroup.stdout | default('') | lower)"
+    fail_msg: >-
+      验证失败：nvidia-smi={{ 'OK' if gpu_verify_smi.rc | default(1) == 0 else '不可用' }}，
+      containerd={{ gpu_verify_containerd.stdout | default('未检测到', true) | trim }}，
+      config version 行={{ gpu_verify_config_version.stdout | default('', true) | trim | default('未匹配到 ^version = 3', true) }}，
+      SystemdCgroup 行={{ gpu_verify_systemd_cgroup.stdout | default('', true) | trim | default('未匹配到 SystemdCgroup', true) }}。
+      需要 containerd >= {{ containerd_min_version | default('2.0.0') }}、config.toml 中 version = 3 且 SystemdCgroup = true。
+      请按 docs/install/gpu.md 第 6 章检查配置并重启 containerd 后重跑。
+    success_msg: "GPU 运行时校验通过（containerd {{ gpu_verify_containerd_version }}）"
+
+- name: List CDI devices on GPU nodes
+  command: nvidia-ctk cdi list
+  register: gpu_verify_cdi
+  changed_when: false
+  failed_when: false
+
+- name: Assert CDI devices are available on GPU nodes
+  assert:
+    that:
+      - gpu_verify_cdi.rc | default(1) == 0
+      - "'nvidia.com/gpu=' in (gpu_verify_cdi.stdout | default(''))"
+    fail_msg: >-
+      nvidia-ctk cdi list 未发现 nvidia.com/gpu=... 设备
+      （rc={{ gpu_verify_cdi.rc | default('unknown') }}）。
+      请重新生成 CDI 规格（nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml），
+      并确认 containerd 配置已启用 CDI 后重跑。
+    success_msg: "CDI 设备校验通过"
+
+- name: Create GPU smoke test manifest on the first master
+  copy:
+    dest: /tmp/nvidia-gpu-smoke-test.yaml
+    mode: '0644'
+    content: |
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: nvidia-gpu-smoke-test
+        namespace: default
+      spec:
+        restartPolicy: Never
+        containers:
+          - name: gpu-smoke
+            image: {{ gpu_smoke_image }}
+            command: ["nvidia-smi"]
+            resources:
+              limits:
+                nvidia.com/gpu: 1
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+  when: gpu_smoke_test | bool
+
+- name: Remove a leftover GPU smoke test pod
+  command: kubectl -n default delete pod nvidia-gpu-smoke-test --ignore-not-found --wait=true --timeout=60s
+  changed_when: false
+  failed_when: false
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+  when: gpu_smoke_test | bool
+
+- name: Create the GPU smoke test pod
+  command: kubectl apply -f /tmp/nvidia-gpu-smoke-test.yaml
+  register: gpu_smoke_apply
+  changed_when: "'created' in gpu_smoke_apply.stdout"
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+  when: gpu_smoke_test | bool
+
+- name: Wait for the GPU smoke test pod to reach a terminal phase
+  command: kubectl -n default get pod nvidia-gpu-smoke-test -o jsonpath={.status.phase}
+  register: gpu_smoke_phase
+  until: >-
+    (gpu_smoke_phase.stdout | default('', true) | trim) in ['Succeeded', 'Failed'] or
+    (gpu_smoke_phase.rc | default(0) != 0)
+  retries: 30
+  delay: 10
+  changed_when: false
+  failed_when: false
+  ignore_errors: true
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+  when: gpu_smoke_test | bool
+
+- name: Assert the GPU smoke test pod reached a terminal phase
+  assert:
+    that:
+      - gpu_smoke_phase.stdout | default('', true) | trim in ['Succeeded', 'Failed']
+    fail_msg: >-
+      GPU 冒烟测试 Pod 未在 300 秒内进入 Succeeded/Failed
+      （当前 phase={{ gpu_smoke_phase.stdout | default('', true) | trim | default('Unknown', true) }}）。
+      请执行 kubectl -n default describe pod nvidia-gpu-smoke-test 与
+      kubectl -n default logs nvidia-gpu-smoke-test 排查；若长时间 Pending，
+      请检查节点 allocatable 中的 nvidia.com/gpu 是否大于 0。
+  run_once: true
+  when: gpu_smoke_test | bool
+
+- name: Read GPU smoke test logs
+  command: kubectl -n default logs nvidia-gpu-smoke-test
+  register: gpu_smoke_logs
+  changed_when: false
+  failed_when: false
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+  when: gpu_smoke_test | bool
+
+- name: Show GPU smoke test logs
+  debug:
+    msg: "{{ gpu_smoke_logs.stdout_lines | default([]) }}"
+  run_once: true
+  when: gpu_smoke_test | bool
+
+- name: Fail when the GPU smoke test pod reports Failed
+  fail:
+    msg: >-
+      GPU 冒烟测试失败：Pod phase=Failed。日志：
+      {{ gpu_smoke_logs.stdout | default('', true) | trim | default('空', true) }}。
+      请进一步执行 kubectl -n default describe pod nvidia-gpu-smoke-test 查看事件，
+      并检查 device plugin 是否分配 GPU、containerd nvidia runtime/CDI 配置是否正确。
+      Pod 已保留在 default 命名空间便于排查，处理后可执行
+      kubectl -n default delete pod nvidia-gpu-smoke-test 删除。
+  run_once: true
+  when:
+    - gpu_smoke_test | bool
+    - gpu_smoke_phase.stdout | default('', true) | trim == 'Failed'
+
+- name: Delete the GPU smoke test pod
+  command: kubectl -n default delete pod nvidia-gpu-smoke-test --ignore-not-found --wait=false
+  changed_when: false
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+  when:
+    - gpu_smoke_test | bool
+    - gpu_smoke_phase.stdout | default('', true) | trim == 'Succeeded'

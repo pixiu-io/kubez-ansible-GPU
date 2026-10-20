@@ -1,0 +1,165 @@
+---
+- name: Assert kube-master group is defined
+  assert:
+    that:
+      - groups['kube-master'] | default([]) | length > 0
+    fail_msg: >-
+      inventory 中未找到 kube-master 组，无法部署 NVIDIA device plugin。
+      请先完成 Kubernetes 集群部署（kubez-ansible deploy）。
+  run_once: true
+
+- name: Check helm availability on the first master
+  shell: command -v helm
+  register: gpu_helm_binary
+  changed_when: false
+  failed_when: false
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+
+- name: Check kubectl availability on the first master
+  shell: command -v kubectl
+  register: gpu_kubectl_binary
+  changed_when: false
+  failed_when: false
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+
+- name: Assert helm and kubectl are available on the first master
+  assert:
+    that:
+      - gpu_helm_binary.rc | default(1) == 0
+      - gpu_kubectl_binary.rc | default(1) == 0
+    fail_msg: >-
+      GPU device plugin 部署依赖 master 上的 helm 与 kubectl。
+      helm：{{ '已找到' if gpu_helm_binary.rc | default(1) == 0 else '未找到，请确认 globals.yml 中 enable_helm: "yes" 且 deploy 已执行' }}；
+      kubectl：{{ '已找到' if gpu_kubectl_binary.rc | default(1) == 0 else '未找到，请先完成 kubez-ansible deploy' }}。
+  run_once: true
+
+- name: Wait for GPU nodes to be Ready
+  command: kubectl wait --for=condition=Ready node/{{ item }} --timeout=300s
+  loop: "{{ groups['gpu'] }}"
+  changed_when: false
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+
+- name: Label GPU nodes for the NVIDIA device plugin
+  command: kubectl label node {{ item }} nvidia.com/gpu.present=true --overwrite
+  loop: "{{ groups['gpu'] }}"
+  changed_when: false
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+
+- name: Copy NVIDIA RuntimeClass manifest to the first master
+  copy:
+    dest: /tmp/nvidia-runtimeclass.yaml
+    mode: '0644'
+    content: |
+      apiVersion: node.k8s.io/v1
+      kind: RuntimeClass
+      metadata:
+        name: nvidia
+      handler: nvidia
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+
+- name: Apply NVIDIA RuntimeClass
+  command: kubectl apply -f /tmp/nvidia-runtimeclass.yaml
+  register: gpu_runtimeclass_apply
+  changed_when: "'created' in gpu_runtimeclass_apply.stdout or 'configured' in gpu_runtimeclass_apply.stdout"
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+
+- name: Add NVIDIA device plugin Helm repository
+  command: helm repo add nvdp https://nvidia.github.io/k8s-device-plugin
+  register: gpu_helm_repo
+  changed_when: "'has been added' in gpu_helm_repo.stdout"
+  failed_when: >-
+    gpu_helm_repo.rc | default(1) != 0 and
+    'already exists' not in ((gpu_helm_repo.stdout | default('')) ~ (gpu_helm_repo.stderr | default('')))
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+
+- name: Update Helm repositories
+  command: helm repo update
+  changed_when: false
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+
+- name: Install or upgrade the NVIDIA device plugin
+  vars:
+    gpu_device_plugin_version_flag: >-
+      {{ '--version ' ~ gpu_device_plugin_version if (gpu_device_plugin_version | string | length) > 0 else '' }}
+  command: >-
+    helm upgrade --install nvidia-device-plugin nvdp/nvidia-device-plugin
+    --namespace {{ gpu_device_plugin_namespace }}
+    --create-namespace
+    {{ gpu_device_plugin_version_flag }}
+    --set runtimeClassName=nvidia
+  register: gpu_device_plugin_install
+  changed_when: >-
+    'Installing it now' in gpu_device_plugin_install.stdout or
+    'has been upgraded' in gpu_device_plugin_install.stdout
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+
+- name: Wait for the NVIDIA device plugin DaemonSet rollout
+  command: kubectl -n {{ gpu_device_plugin_namespace }} rollout status ds/nvidia-device-plugin --timeout=300s
+  register: gpu_device_plugin_rollout
+  until: gpu_device_plugin_rollout.rc | default(1) == 0
+  retries: 60
+  delay: 5
+  failed_when: false
+  changed_when: false
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+
+- name: Assert the NVIDIA device plugin DaemonSet is ready
+  assert:
+    that:
+      - gpu_device_plugin_rollout.rc | default(1) == 0
+    fail_msg: >-
+      NVIDIA device plugin DaemonSet 未在预期时间内 Ready：
+      {{ gpu_device_plugin_rollout.stderr | default('', true) | trim | default(gpu_device_plugin_rollout.stdout | default('', true) | trim, true) }}。
+      请检查 helm release、Pod 事件与 containerd nvidia runtime/CDI 配置。
+  run_once: true
+
+- name: Read allocatable nvidia.com/gpu for each GPU node
+  command: "kubectl get node {{ item }} -o jsonpath='{.status.allocatable.nvidia\\.com/gpu}'"
+  loop: "{{ groups['gpu'] }}"
+  register: gpu_allocatable
+  until: (gpu_allocatable.stdout | default('', true) | trim | int) > 0
+  retries: 30
+  delay: 5
+  changed_when: false
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+
+- name: Assert every GPU node advertises nvidia.com/gpu capacity
+  assert:
+    that:
+      - item.stdout | default('', true) | trim | int > 0
+    fail_msg: >-
+      节点 {{ item.item }} 的 allocatable["nvidia.com/gpu"] 为
+      "{{ item.stdout | default('', true) | trim | default('空', true) }}"（需大于 0）。
+      请检查 device plugin Pod 是否 Ready
+      （kubectl -n {{ gpu_device_plugin_namespace }} get pods -l app.kubernetes.io/name=nvidia-device-plugin），
+      GPU 节点上 nvidia-ctk cdi list 是否包含 nvidia.com/gpu=...，
+      以及 /etc/containerd/config.toml 是否已配置 nvidia runtime 并重启 containerd。
+  loop: "{{ gpu_allocatable.results }}"
+  run_once: true

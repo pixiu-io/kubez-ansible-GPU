@@ -1,0 +1,6 @@
+---
+- name: Restart containerd for GPU
+  service:
+    name: containerd
+    state: restarted
+    enabled: yes

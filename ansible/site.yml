@@ -32,3 +32,9 @@
     - { role: kubernetes,
         tags: kubernetes,
         when: enable_kubernetes | bool }
+
+- name: Apply role gpu
+  gather_facts: false
+  hosts: gpu
+  roles:
+    - { role: gpu, tags: gpu, when: enable_gpu | bool }

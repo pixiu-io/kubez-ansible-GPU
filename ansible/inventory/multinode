@@ -25,6 +25,10 @@ kube03
 [storage]
 kube01
 
+# GPU 节点（启用 enable_gpu 时填写，节点需同时在 kubernetes 组中）
+[gpu]
+# kube02
+
 
 # Don't change the bellow groups
 [kube-master:children]
