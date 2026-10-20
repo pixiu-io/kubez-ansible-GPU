@@ -1,0 +1,73 @@
+---
+- name: Ensure /usr/share/keyrings exists
+  file:
+    path: /usr/share/keyrings
+    state: directory
+    mode: '0755'
+
+- name: Add NVIDIA Container Toolkit GPG key
+  get_url:
+    url: https://nvidia.github.io/libnvidia-container/gpgkey
+    dest: /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    mode: '0644'
+
+- name: Add NVIDIA Container Toolkit repository
+  apt_repository:
+    repo: >-
+      deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg]
+      https://nvidia.github.io/libnvidia-container/stable/deb/{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }} /
+    filename: nvidia-container-toolkit
+    state: present
+    update_cache: yes
+
+- name: Install NVIDIA Container Toolkit
+  vars:
+    gpu_toolkit_package: >-
+      nvidia-container-toolkit{{ '' if (gpu_toolkit_version | string | length) == 0 else '=' ~ gpu_toolkit_version }}
+  apt:
+    name: "{{ gpu_toolkit_package }}"
+    state: present
+
+- name: Check for an existing NVIDIA runtime in containerd configuration
+  command: grep -R "runtimes.nvidia" /etc/containerd/config.toml /etc/containerd/conf.d
+  register: gpu_containerd_runtime_config
+  changed_when: false
+  failed_when: false
+
+- name: Configure containerd NVIDIA runtime
+  command: nvidia-ctk runtime configure --runtime=containerd --set-as-default --cdi.enabled
+  notify:
+    - Restart containerd for GPU
+  when: gpu_containerd_runtime_config.rc | default(1) != 0
+
+- name: Ensure CDI spec directory exists
+  file:
+    path: /etc/cdi
+    state: directory
+    mode: '0755'
+
+- name: Generate NVIDIA CDI specification
+  command: nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+  changed_when: true
+
+- name: List generated CDI devices
+  command: nvidia-ctk cdi list
+  register: gpu_cdi_devices
+  changed_when: false
+  failed_when: false
+
+- name: Assert CDI enumerates NVIDIA GPU devices
+  assert:
+    that:
+      - gpu_cdi_devices.rc | default(1) == 0
+      - "'nvidia.com/gpu=' in (gpu_cdi_devices.stdout | default(''))"
+    fail_msg: >-
+      nvidia-ctk cdi list 未发现 nvidia.com/gpu=... 设备
+      （rc={{ gpu_cdi_devices.rc | default('unknown') }}，
+      输出={{ gpu_cdi_devices.stdout | default('', true) | trim | default('空', true) }}）。
+      请确认 nvidia-smi 正常、/etc/cdi/nvidia.yaml 已生成，且 /etc/containerd/config.toml 中 enable_cdi = true；
+      处理后重新执行 kubez-ansible deploy。
+    success_msg: "CDI 设备检查通过"
+
+- name: Apply containerd configuration changes before deploying the device plugin
+  meta: flush_handlers

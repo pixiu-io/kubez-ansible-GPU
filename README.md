@@ -1,6 +1,6 @@
 # Kubez-ansible-GPU
 
-`kubez-ansible-GPU` 是面向 **NVIDIA RTX 4090 + Ubuntu 22.04 LTS** 的 [kubez-ansible](https://github.com/pixiu-io/kubez-ansible) 定制分支，用于部署 Kubernetes 集群；GPU 软件栈按文档手工接入。
+`kubez-ansible-GPU` 是面向 **NVIDIA RTX 4090 + Ubuntu 22.04 LTS** 的 [kubez-ansible](https://github.com/pixiu-io/kubez-ansible) 定制分支，用于部署 Kubernetes 集群；GPU 软件栈可按需自动化接入，也可按文档手工接入。
 
 ![Build Status][build-url]
 [![License][license-image]][license-url]
@@ -15,7 +15,7 @@
 | 容器运行时 | containerd 2.x（Kubernetes 1.37 要求 2.0+） |
 | GPU 软件栈 | NVIDIA R580 LTSB + Container Toolkit + k8s-device-plugin |
 
-> 仓库负责 Kubernetes 与主机初始化；NVIDIA 驱动、CUDA、Container Toolkit、device plugin 需手工安装。该流程为目标环境，尚未完成实机验证。
+> 仓库负责 Kubernetes 与主机初始化；GPU 组件可通过 `enable_gpu: "yes"` 自动化（默认关闭，驱动需 `gpu_driver_install: "yes"`），也可按文档手工安装。目标环境，尚未完成实机验证。
 
 ## 镜像地址
 

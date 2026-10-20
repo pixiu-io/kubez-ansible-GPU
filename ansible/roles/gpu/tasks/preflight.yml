@@ -1,0 +1,114 @@
+---
+- name: Assert GPU host runs Ubuntu 22.04 or newer
+  assert:
+    that:
+      - ansible_distribution | default('') == "Ubuntu"
+      - ansible_distribution_version | default('0') is version("22.04", ">=")
+    fail_msg: >-
+      GPU 自动化仅支持 Ubuntu 22.04 LTS 及以上：当前为
+      {{ ansible_distribution | default('unknown') }} {{ ansible_distribution_version | default('unknown') }}。
+      请将主机升级/重装为 Ubuntu 22.04 LTS，或将主机从 inventory 的 [gpu] 组移除。
+    success_msg: "GPU 主机系统检查通过（Ubuntu {{ ansible_distribution_version | default('unknown') }}）"
+
+- name: Install pciutils for GPU discovery
+  apt:
+    name: pciutils
+    state: present
+    update_cache: yes
+
+- name: List PCI devices
+  command: lspci -nn
+  register: gpu_lspci_result
+  changed_when: false
+  failed_when: false
+
+- name: Assert lspci is usable
+  assert:
+    that:
+      - gpu_lspci_result.rc | default(1) == 0
+    fail_msg: >-
+      lspci 执行失败（rc={{ gpu_lspci_result.rc | default('unknown') }}）。
+      请确认 pciutils 已安装且主机可以枚举 PCI 设备，然后重跑部署。
+    success_msg: "PCI 设备枚举正常"
+
+- name: Detect NVIDIA GPU on host
+  set_fact:
+    gpu_present: >-
+      {{ 'nvidia' in (gpu_lspci_result.stdout | default('') | lower) and
+         ((gpu_expected_model | string | length) == 0 or
+          (gpu_expected_model | lower) in (gpu_lspci_result.stdout | default('') | lower)) }}
+
+- name: Assert host has the expected NVIDIA GPU
+  assert:
+    that:
+      - gpu_present | bool
+    fail_msg: >-
+      {{ inventory_hostname }} 上未检测到预期 NVIDIA GPU
+      （lspci 输出需包含 "NVIDIA"{{ ' 与型号 "' ~ gpu_expected_model ~ '"' if gpu_expected_model | string | length > 0 else '' }}）。
+      [gpu] 组只能包含 GPU 节点；若实际型号不同，请调整 globals.yml 中的 gpu_expected_model。
+    success_msg: "GPU 检测通过：{{ inventory_hostname }}"
+
+- name: Check cgroup filesystem type
+  command: stat -fc %T /sys/fs/cgroup/
+  register: gpu_cgroup_fs
+  changed_when: false
+  failed_when: false
+
+- name: Assert cgroup v2 is enabled
+  assert:
+    that:
+      - gpu_cgroup_fs.rc | default(1) == 0
+      - gpu_cgroup_fs.stdout | default('') | trim == "cgroup2fs"
+    fail_msg: >-
+      GPU 需要 cgroup v2，当前 /sys/fs/cgroup 类型为
+      "{{ gpu_cgroup_fs.stdout | default('unknown', true) | trim | default('unknown', true) }}"。
+      Ubuntu 22.04 默认启用 cgroup v2；如被关闭，请在 GRUB 中移除 systemd.unified_cgroup_hierarchy=0
+      （或设置为 1），执行 update-grub 后重启主机，再重跑部署。
+    success_msg: "cgroup v2 检查通过"
+
+- name: Get containerd version
+  command: containerd --version
+  register: gpu_containerd_version
+  changed_when: false
+  failed_when: false
+
+- name: Assert containerd meets the minimum version
+  vars:
+    gpu_containerd_version_number: >-
+      {{ (gpu_containerd_version.stdout | default('', true)
+          | regex_search('[0-9]+\.[0-9]+\.[0-9]+')) | default('0.0.0', true) }}
+  assert:
+    that:
+      - gpu_containerd_version.rc | default(1) == 0
+      - gpu_containerd_version_number is version(containerd_min_version | default('2.0.0'), '>=')
+    fail_msg: >-
+      containerd 检查失败：{{ gpu_containerd_version.stdout | default('未检测到 containerd --version 输出', true) | trim }}。
+      GPU 节点需要 containerd >= {{ containerd_min_version | default('2.0.0') }}（config version 3）。
+      请先完成 bootstrap-servers/deploy 的 containerd 2.x 安装，或按 docs/install/gpu.md 第 6 章处理。
+    success_msg: "containerd 版本检查通过（{{ gpu_containerd_version_number }}）"
+
+- name: Query NVIDIA driver state before deploy
+  command: nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+  register: gpu_nvidia_smi_check
+  changed_when: false
+  failed_when: false
+  when: not (gpu_driver_install | bool)
+
+- name: Assert NVIDIA driver is installed and meets the minimum version
+  vars:
+    gpu_nvidia_smi_first_line: "{{ gpu_nvidia_smi_check.stdout_lines | default([]) | first | default('', true) }}"
+    gpu_current_driver_version: "{{ gpu_nvidia_smi_first_line | regex_search('[0-9]+\\.[0-9]+(?:\\.[0-9]+)?') | default('0.0.0', true) }}"
+  assert:
+    that:
+      - gpu_nvidia_smi_check.rc | default(1) == 0
+      - gpu_current_driver_version is version(gpu_driver_min_version, '>=')
+      - >-
+        (gpu_expected_model | string | length) == 0 or
+        (gpu_expected_model | lower) in (gpu_nvidia_smi_check.stdout | default('') | lower)
+    fail_msg: >-
+      未检测到满足要求的 NVIDIA 驱动（nvidia-smi rc={{ gpu_nvidia_smi_check.rc | default('unknown') }}，
+      驱动版本={{ gpu_current_driver_version }}，要求 >= {{ gpu_driver_min_version }}）。
+      若尚未安装驱动，可在 globals.yml 设置 gpu_driver_install: "yes" 后重跑（随后仍需处理重启/MOK）；
+      若已安装但 nvidia-smi 不可用，请按 docs/install/gpu.md 第 5 章检查内核模块、Secure Boot/MOK 与重启状态。
+    success_msg: "NVIDIA 驱动检查通过（{{ gpu_current_driver_version }}）"
+  when: not (gpu_driver_install | bool)

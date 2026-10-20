@@ -33,24 +33,22 @@
 本仓库（kubez-ansible-GPU）负责：
 
 - 主机初始化：依赖包、防火墙服务处置（Ubuntu 上停止并禁用 `ufw`）、内核模块与 sysctl（deploy 阶段）
-- 容器运行时安装：Ubuntu 上默认安装发行版 `containerd` 包并下发 `config.toml`
+- 容器运行时安装：Ubuntu 使用 Docker 仓库的 `containerd.io` 2.x，并下发 `version = 3` 配置
 - Kubernetes 控制面/工作节点（kubeadm）与 CNI（默认 Calico）
+- 可选（`enable_gpu: "yes"`）：GPU preflight、NVIDIA Container Toolkit、CDI、RuntimeClass、device plugin、节点容量校验
+- 可选（`gpu_driver_install: "yes"`）：NVIDIA 驱动 apt 安装与版本锁定；Secure Boot/MOK 注册和重启仍需人工
 
-本仓库不负责（需手工）：
+默认不负责：
 
-- NVIDIA GPU 驱动、CUDA Toolkit
-- NVIDIA Container Toolkit（`nvidia-ctk`、CDI）
-- k8s-device-plugin / NVIDIA GPU Operator
+- CUDA Toolkit（由工作负载镜像自带 runtime）
+- NVIDIA GPU Operator（保留手工/Helm 可选路径）
 - 驱动或内核升级后的 DKMS 重建、CDI 重新生成
 
 `v3.0.4-gpu` / `v3.0.4-arm64-gpu` 镜像只包含 kubez-ansible 工具链（Ansible 运行环境与 kubez-ansible 本体），不包含 GPU 驱动、CUDA 或 NVIDIA 容器运行时。
 
 ### 2.2 部署顺序与覆盖关系
 
-以下覆盖关系决定了执行顺序：
-
-1. `bootstrap-servers` 会用 `ansible/roles/baremetal/templates/config.toml.j2` 重写 `/etc/containerd/config.toml`。该模板当前是 `version = 2`、旧 CRI 插件路径 `io.containerd.grpc.v1.cri`。
-2. 因此，containerd 2.x 的 `version = 3` 配置和 NVIDIA Container Toolkit 写入的 runtime 配置，都必须在 `bootstrap-servers` 之后落地，否则会被覆盖。
+`bootstrap-servers` 会用 `ansible/roles/baremetal/templates/config.toml.j2` 重写 `/etc/containerd/config.toml`。当前模板已经是 containerd 2.x 的 `version = 3` 配置；NVIDIA Container Toolkit 写入的 runtime 配置仍必须在**最后一次** `bootstrap-servers` 之后落地，否则会被覆盖。
 
 实际执行顺序：
 
@@ -59,23 +57,55 @@ BIOS / 硬件
    ↓
 Ubuntu 22.04 基线
    ↓
-NVIDIA 驱动 R580
+NVIDIA 驱动 R580（gpu_driver_install 或手工）
    ↓
-kubez-ansible bootstrap-servers      ← 安装 K8s 包、发行版 containerd，重写 config.toml
-   ↓
-[手工] containerd 2.x 替换            ← 必须在 deploy 之前
-[手工] version=3 配置 + sandbox 对齐
+kubez-ansible bootstrap-servers      ← 安装 containerd.io 2.x，写入 version=3 配置
    ↓
 kubez-ansible deploy                 ← kubeadm init / join
    ↓
-[手工] NVIDIA Container Toolkit      ← 必须在 bootstrap 之后
+NVIDIA Container Toolkit             ← gpu 角色或手工；必须在 bootstrap 之后
    ↓
-[手工] NVIDIA device plugin
+NVIDIA device plugin                 ← gpu 角色或手工
    ↓
 GPU 验证
 ```
 
-> 说明：文档章节先讲 containerd 再讲 kubez 部署，是为了按组件说明；实际执行点以上图为准。若先安装 `containerd.io` 2.x 再执行 `bootstrap-servers`，Ubuntu 上 bootstrap 仍会尝试安装发行版 `containerd` 包，可能与 `containerd.io` 冲突；推荐先 bootstrap，再在 deploy 前完成替换。重复执行 `bootstrap-servers` 会再次覆盖配置，需要重新落地 containerd 与 Toolkit 配置。
+> 使用 `enable_gpu: "yes"` 时，Toolkit、device plugin 和验证由 `gpu` 角色在 `deploy` 末尾完成；未启用时按第 8、9 章手工执行。重复执行 `bootstrap-servers` 会覆盖 containerd 配置，需要重新执行 Toolkit 配置（`gpu` 角色可重跑）。
+
+### 2.3 自动化部署（可选）
+
+除上述手工流程外，本仓库提供可选的 `gpu` 角色（默认关闭），在 `kubez-ansible deploy` 末尾自动完成 GPU 主机检查、Container Toolkit、device plugin 与容量校验。未启用时，仍按 2.1 的能力边界与后续章节手工接入。
+
+**inventory**：将 GPU 节点加入 `[gpu]` 组（这些节点必须同时已在 `[kubernetes]` 组中参与集群部署）：
+
+```ini
+[gpu]
+kube02
+```
+
+**globals.yml**：
+
+```yaml
+enable_gpu: "yes"                 # 总开关，默认 "no"
+gpu_driver_install: "no"          # 是否自动安装 NVIDIA 驱动，默认 "no"
+gpu_driver_package: "nvidia-driver-580-open"
+gpu_toolkit_version: ""           # 留空使用仓库最新版
+gpu_device_plugin_version: "0.20.0"
+gpu_device_plugin_namespace: "kube-system"
+gpu_smoke_test: "no"              # 部署后是否运行 nvidia-smi 冒烟测试
+gpu_expected_model: "4090"
+```
+
+执行 `kubez-ansible deploy`（已有集群可执行 `kubez-ansible deploy --tags gpu`）后，`gpu` 角色会依次执行：
+
+1. preflight：校验 Ubuntu 22.04+、`[gpu]` 组内确有预期 NVIDIA GPU、cgroup v2、containerd >= 2.x，以及（未启用自动装驱动时）现有驱动版本。
+2. NVIDIA Container Toolkit：添加官方 apt 仓库并安装，配置 containerd `nvidia` runtime，生成 `/etc/cdi/nvidia.yaml` 并校验 `nvidia-ctk cdi list`。
+3. device plugin：等待 GPU 节点 Ready、打 `nvidia.com/gpu.present=true` 标签、创建 `nvidia` RuntimeClass，并通过 Helm 安装 `nvidia-device-plugin`，最后校验节点 `nvidia.com/gpu` 容量大于 0。该步骤依赖 master 上的 Helm（默认 `enable_helm: "yes"`）。
+4. 校验：确认 `nvidia-smi`、containerd `version = 3`/`SystemdCgroup` 与 CDI 设备；`gpu_smoke_test: "yes"` 时额外运行一次 GPU 冒烟 Pod。
+
+驱动默认不自动安装（`gpu_driver_install: "no"`），此时 preflight 只校验已有驱动版本。若设置 `gpu_driver_install: "yes"`，角色会添加 `ppa:graphics-drivers/ppa` 并安装 `gpu_driver_package`；Secure Boot 环境下的 MOK 注册与重启仍需人工完成，重启后重新执行 `kubez-ansible deploy`（或 `--tags gpu`）继续后续步骤。
+
+> 该自动化需要访问 NVIDIA Container Toolkit apt 源、device plugin Helm 仓库及对应镜像；离线环境需先配置内网镜像/仓库，或退回第 8、9 章手工部署。
 
 ## 3. 主机与 BIOS
 
@@ -213,6 +243,8 @@ NTP service: active
 若环境无法访问外网 NTP，请配置内网时间源；Kubernetes 证书与 token 对时间偏差敏感。
 
 ## 5. NVIDIA 驱动 R580 LTSB
+
+> 使用 `gpu_driver_install: "yes"` 时，驱动安装由 `gpu` 角色执行；以下为手工路径与排障。驱动安装后通常需要重启，Secure Boot 还需 MOK 注册，角色不会代替这两步。
 
 ### 5.1 版本选择
 
@@ -353,43 +385,44 @@ nvidia-smi
 
 ## 6. containerd 2.x
 
-### 6.1 为什么必须显式升级
+> 本分支最新代码在 Ubuntu 上默认安装 Docker 仓库的 `containerd.io` 2.x，并由 `bootstrap-servers` 下发 `version = 3` 模板。正常情况下无需执行 6.3/6.4；它们用于旧版本仓库、手工部署或排障。
+
+### 6.1 版本要求
 
 - Kubernetes 1.37 要求 containerd 2.0+；1.36 起也应使用 containerd 2.x。
-- Ubuntu 22.04 的 `containerd` 包在常规归档中常见为 1.6.x，但部分更新镜像可能已提供 2.2.x；kubez 在 Ubuntu 上默认安装的正是这个包（`ansible/group_vars/all.yml` 的 `containerd_package_ubuntu`）。
-- 不要假定 apt 源版本：先执行 `containerd --version` / `apt-cache policy containerd` 确认；只有低于 2.0 时才需要按 6.3 改用 Docker 仓库的 `containerd.io`。
-- 因此即使继续使用仓库默认的 Kubernetes 1.36.2，只要运行时仍是 containerd 1.x，就必须替换为 containerd 2.x。
+- 不要假定 apt 源版本：部署后执行 `containerd --version` 确认；低于 2.0 时按 6.3 切换到 Docker 仓库的 `containerd.io`。
+- `containerd_release` 可用于固定 `containerd.io` 版本；留空则安装仓库最新版。
 
-先确认当前版本：
+确认当前版本：
 
 ```bash
 containerd --version
-apt-cache policy containerd
+apt-cache policy containerd.io
 ```
 
-预期（升级前，示例）：
+预期（示例）：
 
 ```text
-containerd github.com/containerd/containerd 1.6.xx ...
+containerd github.com/containerd/containerd/v2 v2.3.5 ...
 ```
 
 ### 6.2 执行时机（重要）
 
 `bootstrap-servers` 会：
 
-1. 安装发行版 `containerd` 包；
-2. 用 `config.toml.j2` 重写 `/etc/containerd/config.toml`（当前模板 `version = 2`、旧 CRI 路径）；
+1. 安装 `containerd.io` 2.x；
+2. 用 `config.toml.j2` 重写 `/etc/containerd/config.toml`（`version = 3`）；
 3. 重启 containerd。
 
-所以推荐顺序是：
+因此 NVIDIA Container Toolkit 的 runtime 配置必须在**最后一次** `bootstrap-servers` 之后落地：
 
 ```text
-bootstrap-servers → 替换为 containerd.io 2.x → 落地 version=3 配置 → deploy
+bootstrap-servers → deploy → Toolkit 配置（gpu 角色或手工）
 ```
 
-如果先在 Ubuntu 上安装 `containerd.io`，再执行 `bootstrap-servers`，bootstrap 的 `containerd` 包安装可能与 `containerd.io` 冲突（两者都提供 containerd 二进制）。除非已确认 apt 的替换行为，否则不要采用这个顺序。
+重复执行 `bootstrap-servers` 会覆盖 `/etc/containerd/config.toml`，需要重新执行 Toolkit 配置。若使用 `gpu` 角色，重跑 `kubez-ansible deploy --tags gpu` 即可。
 
-### 6.3 安装 containerd.io 2.x
+### 6.3 手工切换 containerd.io 2.x（回退）
 
 > 前置判断：如果 6.1 已确认 `containerd --version` 为 2.x，跳过本节，直接执行 6.4 的配置迁移。
 
@@ -429,11 +462,13 @@ containerd.io | 2.3.5-1 | https://... jammy/stable amd64 Packages
 
 ```bash
 sudo systemctl stop containerd
-sudo apt remove -y containerd          # 移除 Ubuntu 发行版包；若 apt 提示冲突，先执行本行
+# 若当前是旧版 containerd.io，直接升级到 2.x
 sudo apt install -y containerd.io=2.3.5-1
+# 若旧环境装的是 Ubuntu 发行版 containerd，先移除再安装：
+# sudo apt remove -y containerd
 ```
 
-> 版本号仅为示例。`containerd.io` 的完整版本串通常带发行版后缀（如 `2.3.5-1~ubuntu.22.04~jammy`），请直接使用 `apt-cache madison` 输出的值。`apt remove containerd` 可能同时移除依赖它的包，执行前用 `apt -s remove containerd` 做 dry-run 确认。
+> 版本号仅为示例。`containerd.io` 的完整版本串通常带发行版后缀（如 `2.3.5-1~ubuntu.22.04~jammy`），请直接使用 `apt-cache madison` 输出的值。发行版 `containerd` 与 `containerd.io` 冲突时，先用 `apt -s remove containerd` 做 dry-run 确认再执行。
 
 确认版本：
 
@@ -447,7 +482,7 @@ containerd --version
 containerd github.com/containerd/containerd/v2 v2.3.5 ...
 ```
 
-### 6.4 生成 version=3 配置
+### 6.4 手工生成 version=3 配置（回退）
 
 ```bash
 sudo mkdir -p /etc/containerd
@@ -547,20 +582,25 @@ systemctl status containerd --no-pager
 Active: active (running)
 ```
 
-### 6.5 kubez 模板警告
+### 6.5 配置核对
 
-仓库当前的 `ansible/roles/baremetal/templates/config.toml.j2` 仍是：
+`bootstrap-servers` 完成后，在 GPU 节点确认：
 
-- `version = 2`
-- `[plugins."io.containerd.grpc.v1.cri"]`
-- `systemd_cgroup = false`（真正生效的 `SystemdCgroup = true` 在 runc options 下）
-- 包含 containerd 2.0 已移除的 `io.containerd.runtime.v1.linux` 段
+```bash
+containerd --version
+grep -E '^version = 3|SystemdCgroup|sandbox =|enable_cdi' /etc/containerd/config.toml
+```
 
-在仓库完成 v3 模板改造前：
+预期：
 
-- 每次执行 `bootstrap-servers` 后都要手工重新落地 6.4 的 v3 配置；
-- 不要把 v3 配置的备份交给 bootstrap 覆盖；
-- 不要在 bootstrap 与 deploy 之间跳步，否则 kubeadm 会连到旧配置的 containerd。
+```text
+version = 3
+SystemdCgroup = true
+sandbox = ".../pause:..."
+enable_cdi = true
+```
+
+如果仍看到 `version = 2` 或 `io.containerd.grpc.v1.cri`，说明当前代码不是最新版或使用了旧配置；按 6.3/6.4 手工回退，或更新仓库后重跑 `bootstrap-servers`。
 
 ## 7. kubez 部署
 
@@ -577,6 +617,10 @@ kube02
 
 [storage]
 kube01
+
+# 启用 GPU 自动化时，GPU 节点同时加入 [gpu] 组
+[gpu]
+kube02
 ```
 
 确认部署节点到所有节点的免密登录已打通（参考 [`auth-key.md`](auth-key.md) 或 [`passwd-key.md`](passwd-key.md)）。
@@ -586,13 +630,13 @@ kube01
 编辑 `/etc/kubez/globals.yml`，至少确认：
 
 ```yaml
-kube_release: 1.36.2                 # 仓库默认；目标 1.37.1 时改为 1.37.1
+kube_release: 1.36.2                 # 仓库默认；目标 1.37.x 时改为源内可用的 1.37 patch
 network_interface: "eth0"            # 改为实际网卡名
 cni: "calico"                        # 默认 Calico
 image_repository: "registry.cn-hangzhou.aliyuncs.com/google_containers"
 ```
 
-> 目标 v1.37.1 的前提是：运行时已切换 containerd 2.x，且 `image_repository` 中存在 v1.37.1 的 kube-apiserver / controller-manager / scheduler / proxy / pause / etcd / coredns 镜像。两者任一不满足，先留在 1.36.2。
+> 目标 v1.37.x 的前提是：`image_repository` 中存在对应 patch 的 kube-apiserver / controller-manager / scheduler / proxy / pause / etcd / coredns 镜像；containerd 2.x 由 `bootstrap-servers` 自动安装。镜像不满足时先留在 1.36.2。
 >
 > 必须修改 `kube_release`。kubeadm 配置模板按 `kube_release` 选择 API 版本（`>=1.31` 用 `v1beta4`，`>=1.24` 用 `v1beta3`），只覆盖 `kubernetes_version` 不会切换 API 版本。
 
@@ -605,8 +649,9 @@ kubez-ansible -i multinode bootstrap-servers
 该步骤会：
 
 - 安装依赖包、Kubernetes 包（`kubelet` / `kubectl` / `kubeadm`）
-- 安装 Ubuntu 发行版 `containerd` 包
-- 写入 `/etc/containerd/config.toml`（version=2）
+- 安装 Docker 仓库的 `containerd.io` 2.x
+- 写入 `/etc/containerd/config.toml`（`version = 3`）
+- 校验 containerd 版本 >= `containerd_min_version`
 - 停止并禁用 `ufw`
 
 预期结尾（示例）：
@@ -656,9 +701,9 @@ registry.cn-hangzhou.aliyuncs.com/google_containers/coredns:v1.12.x
 
 > 以上 tag 为形态示例，pause / etcd / coredns 的具体版本以命令实际输出为准。可在节点上用 `ctr -n k8s.io images pull <image>` 预拉取验证仓库可达。
 
-### 7.5 落地 containerd 2.x 配置
+### 7.5 核对 containerd 配置
 
-如果尚未执行第 6 章，现在执行 6.3～6.4，并在 deploy 前确认：
+最新代码的 `bootstrap-servers` 已自动安装 containerd.io 2.x 并下发 v3 配置；在 deploy 前确认：
 
 ```bash
 containerd --version
@@ -667,7 +712,7 @@ grep 'SystemdCgroup' /etc/containerd/config.toml
 systemctl is-active containerd
 ```
 
-预期：2.x、`version = 3`、`SystemdCgroup = true`、`active`。
+预期：2.x、`version = 3`、`SystemdCgroup = true`、`active`。若不符，按 6.3/6.4 手工回退。
 
 ### 7.6 deploy
 
@@ -698,6 +743,8 @@ kubez-ansible -i multinode post-deploy
 ```
 
 ## 8. NVIDIA Container Toolkit
+
+> 使用 `enable_gpu: "yes"` 时，本章与第 9 章由 `gpu` 角色自动完成；以下命令用于未启用自动化、手工部署或排障。
 
 以下 8.1～8.4 在每个 GPU 节点执行（部署节点无需安装，除非它本身也是 GPU 节点）。
 

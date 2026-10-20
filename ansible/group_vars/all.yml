@@ -133,6 +133,8 @@ kube_packages_rpm:
 docker_release: ""
 # runtime containerd version
 containerd_release: ""
+# containerd 最低版本要求：K8s 1.36+ 需要 containerd 2.x（安装后由 baremetal 角色校验）
+containerd_min_version: "2.0.0"
 # runtime data-root-dir
 runtime_data_dir: ""
 # docker data-root-dir
@@ -143,18 +145,34 @@ containerd_data_dir: "{{ runtime_data_dir }}"
 docker_package_rpm: "docker-ce{{'' if docker_release == '' else '-' ~ docker_release }}"
 containerd_package_rpm: "containerd.io{{'' if containerd_release == '' else '-' ~ containerd_release }}"
 docker_package_apt: "docker-ce{{'' if docker_release == '' else '=' ~ docker_release }}"
-# Debian/非 Ubuntu 的 apt 系使用 containerd.io；Ubuntu 仍用 containerd
+# apt 系（含 Ubuntu）统一使用 Docker 仓库的 containerd.io
+# Ubuntu 22.04 发行版 containerd 常见为 1.6.x，而 K8s 1.36+ 需要 containerd 2.x
 containerd_package_apt: "containerd.io{{'' if containerd_release == '' else '=' ~ containerd_release }}"
 
 # 兼容旧变量名（若外部 globals 仍引用）
 docker_package_rocky: "{{ docker_package_rpm }}"
 containerd_package_rocky: "{{ containerd_package_rpm }}"
 docker_package_ubuntu: "{{ docker_package_apt }}"
-containerd_package_ubuntu: "containerd{{'' if containerd_release == '' else '=' ~ containerd_release }}"
+# Ubuntu 同样使用 Docker 仓库的 containerd.io，含 containerd_release 固定版本语义
+containerd_package_ubuntu: "{{ containerd_package_apt }}"
 docker_package_debian: "{{ docker_package_apt }}"
 containerd_package_debian: "{{ containerd_package_apt }}"
 docker_package_openEuler: "{{ docker_package_rpm }}"
 containerd_package_openEuler: "{{ containerd_package_rpm }}"
+
+#####################
+# GPU Options
+#####################
+# 启用前需在 inventory 中配置 [gpu] 组
+enable_gpu: "no"
+gpu_driver_install: "no"
+gpu_driver_package: "nvidia-driver-580-open"
+gpu_driver_min_version: "525"
+gpu_toolkit_version: ""
+gpu_device_plugin_version: "0.20.0"
+gpu_device_plugin_namespace: "kube-system"
+gpu_smoke_test: "no"
+gpu_expected_model: "4090"
 
 node_config_directory: "/etc/kubez/"
 

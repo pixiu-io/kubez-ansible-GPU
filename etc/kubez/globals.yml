@@ -101,12 +101,34 @@ networkmanager_conf_distributions:
 # 通过 apt-cache madison docker-ce 查找合适版本
 docker_release: ""
 # runtime containerd version
+# 建议显式固定 containerd.io 2.x 版本（K8s 1.36+ 必需）；留空则安装仓库最新版
+# 版本字符串需与 docker-ce 仓库实际包版本一致（apt 用 "=" 固定，rpm 用 "-" 固定）
 containerd_release: ""
 
 # 自定义 docker 数据存放目录
 docker_data_dir: "{{ runtime_data_dir }}"
 # 自定义 containerd 数据存放目录
 containerd_data_dir: "{{ runtime_data_dir }}"
+
+#####################
+# GPU Options
+#####################
+# GPU 支持总开关；启用前需在 inventory 中配置 [gpu] 组
+#enable_gpu: "no"
+# 是否由本仓库安装 NVIDIA 驱动；已有驱动的节点保持 "no"
+#gpu_driver_install: "no"
+# NVIDIA 驱动包名与最低版本（用于安装及版本校验）
+#gpu_driver_package: "nvidia-driver-580-open"
+#gpu_driver_min_version: "525"
+# NVIDIA Container Toolkit 版本；留空表示使用仓库默认最新版
+#gpu_toolkit_version: ""
+# NVIDIA k8s-device-plugin 版本与部署命名空间
+#gpu_device_plugin_version: "0.20.0"
+#gpu_device_plugin_namespace: "kube-system"
+# 安装完成后是否执行 GPU 冒烟测试
+#gpu_smoke_test: "no"
+# 期望的 GPU 型号（供冒烟测试/验收比对）
+#gpu_expected_model: "4090"
 
 ######################
 # Certificate Options

@@ -1,0 +1,75 @@
+---
+- name: Check Secure Boot state
+  command: mokutil --sb-state
+  register: gpu_secure_boot
+  changed_when: false
+  failed_when: false
+
+- name: Warn when Secure Boot state cannot be determined
+  debug:
+    msg: >-
+      未能检测 Secure Boot 状态（mokutil rc={{ gpu_secure_boot.rc | default('unknown') }}）。
+      如主机启用了 Secure Boot，请在驱动安装后确认 MOK 注册并重启。
+  when: gpu_secure_boot.rc | default(1) != 0
+
+- name: Warn that Secure Boot requires manual MOK enrollment
+  debug:
+    msg:
+      - "检测到 Secure Boot 已启用：{{ gpu_secure_boot.stdout | default('', true) | trim }}"
+      - "驱动安装后 nvidia-smi 可能因内核模块未签名而不可用。"
+      - "请按 docs/install/gpu.md 5.3 节完成 MOK 注册并重启，然后重新执行 kubez-ansible deploy 继续后续步骤。"
+  when: "'secureboot enabled' in (gpu_secure_boot.stdout | default('') | lower)"
+
+- name: Install software-properties-common for PPA management
+  apt:
+    name: software-properties-common
+    state: present
+
+- name: Add NVIDIA graphics drivers PPA
+  apt_repository:
+    repo: "ppa:graphics-drivers/ppa"
+    state: present
+    update_cache: yes
+
+- name: Install NVIDIA driver package
+  apt:
+    name: "{{ gpu_driver_package }}"
+    state: present
+
+- name: Hold NVIDIA driver packages to prevent unattended upgrades
+  dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - "{{ gpu_driver_package }}"
+    - "{{ gpu_driver_package | replace('nvidia-driver-', 'nvidia-dkms-') }}"
+  failed_when: false
+
+- name: Query NVIDIA driver after installation
+  command: nvidia-smi --query-gpu=driver_version --format=csv,noheader
+  register: gpu_driver_smi
+  changed_when: false
+  failed_when: false
+
+- name: Fail when the driver still requires a reboot or MOK enrollment
+  fail:
+    msg: >-
+      NVIDIA 驱动包已安装，但 nvidia-smi 仍不可用
+      （rc={{ gpu_driver_smi.rc | default('unknown') }}，
+      stderr={{ gpu_driver_smi.stderr | default('', true) | trim | default('无', true) }}）。
+      如启用了 Secure Boot，请先完成 MOK 注册；随后重启主机，确认 nvidia-smi 正常后重新执行
+      kubez-ansible deploy（或 kubez-ansible deploy --tags gpu）继续安装 Toolkit 与 device plugin。
+  when: gpu_driver_smi.rc | default(1) != 0
+
+- name: Parse installed driver version and assert minimum
+  vars:
+    gpu_installed_driver_version: >-
+      {{ (gpu_driver_smi.stdout_lines | default([]) | first | default('', true))
+         | regex_search('[0-9]+\.[0-9]+(?:\.[0-9]+)?') | default('0.0.0', true) }}
+  assert:
+    that:
+      - gpu_installed_driver_version is version(gpu_driver_min_version, '>=')
+    fail_msg: >-
+      已安装的 NVIDIA 驱动版本 {{ gpu_installed_driver_version }} 低于要求 {{ gpu_driver_min_version }}。
+      请调整 gpu_driver_package（当前 {{ gpu_driver_package }}），或按 docs/install/gpu.md 手工安装满足版本的驱动后重跑。
+    success_msg: "NVIDIA 驱动 {{ gpu_installed_driver_version }} 满足最低版本要求"

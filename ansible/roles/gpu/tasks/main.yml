@@ -1,0 +1,21 @@
+---
+- name: Run GPU automation on [gpu] hosts
+  when:
+    - enable_gpu | bool
+    - inventory_hostname in (groups['gpu'] | default([]))
+  block:
+    - name: Run GPU preflight checks
+      include_tasks: preflight.yml
+
+    - name: Install NVIDIA driver when enabled
+      include_tasks: driver.yml
+      when: gpu_driver_install | bool
+
+    - name: Install NVIDIA Container Toolkit
+      include_tasks: toolkit.yml
+
+    - name: Deploy NVIDIA device plugin
+      include_tasks: device-plugin.yml
+
+    - name: Verify GPU stack
+      include_tasks: verify.yml
