@@ -15,7 +15,7 @@
 | 容器运行时 | containerd 2.x（Kubernetes 1.37 要求 2.0+） |
 | GPU 软件栈 | NVIDIA R580 LTSB + Container Toolkit + k8s-device-plugin |
 
-> 仓库负责 Kubernetes 与主机初始化；NVIDIA 驱动、CUDA、Container Toolkit、device plugin 需按 [GPU 部署文档](docs/install/gpu.md) 手工安装。该文档为目标环境，尚未完成实机验证。
+> 仓库负责 Kubernetes 与主机初始化；NVIDIA 驱动、CUDA、Container Toolkit、device plugin 需手工安装。该流程为目标环境，尚未完成实机验证。
 
 ## 镜像地址
 
@@ -33,12 +33,7 @@ kubez-ansible -i multinode bootstrap-servers
 kubez-ansible -i multinode deploy
 ```
 
-完整流程（BIOS、驱动、containerd 2.x、Toolkit、device plugin、验证）见 [docs/install/gpu.md](docs/install/gpu.md)。
-
-## 文档
-
-- [GPU 部署：Ubuntu 22.04 + RTX 4090](docs/install/gpu.md)
-- [常见问题](docs/faq.md)
+完整流程（BIOS、驱动、containerd 2.x、Toolkit、device plugin、验证）见 [GPU 部署文档](docs/install/gpu.md)；常见问题见 [FAQ](docs/faq.md)。
 
 ## 学习分享
 
