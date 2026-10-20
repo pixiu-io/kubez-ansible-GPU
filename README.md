@@ -26,14 +26,7 @@
 
 镜像仅包含 kubez-ansible 工具链，不含 GPU 驱动与 CUDA。
 
-## 部署
-
-```bash
-kubez-ansible -i multinode bootstrap-servers
-kubez-ansible -i multinode deploy
-```
-
-完整流程（BIOS、驱动、containerd 2.x、Toolkit、device plugin、验证）见 [GPU 部署文档](docs/install/gpu.md)；常见问题见 [FAQ](docs/faq.md)。
+部署与 GPU 接入流程见 [GPU 部署文档](docs/install/gpu.md)；常见问题见 [FAQ](docs/faq.md)。
 
 ## 学习分享
 
