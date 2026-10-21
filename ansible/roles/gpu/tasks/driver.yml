@@ -20,30 +20,57 @@
       - "请按 docs/install/gpu.md 5.3 节完成 MOK 注册并重启，然后重新执行 kubez-ansible deploy 继续后续步骤。"
   when: "'secureboot enabled' in (gpu_secure_boot.stdout | default('') | lower)"
 
-- name: Install software-properties-common for PPA management
-  apt:
-    name: software-properties-common
-    state: present
-
-- name: Add NVIDIA graphics drivers PPA
-  apt_repository:
-    repo: "ppa:graphics-drivers/ppa"
-    state: present
-    update_cache: yes
-
-- name: Install NVIDIA driver package
-  apt:
-    name: "{{ gpu_driver_package }}"
-    state: present
-
-- name: Hold NVIDIA driver packages to prevent unattended upgrades
-  dpkg_selections:
-    name: "{{ item }}"
-    selection: hold
-  loop:
-    - "{{ gpu_driver_package }}"
-    - "{{ gpu_driver_package | replace('nvidia-driver-', 'nvidia-dkms-') }}"
+- name: Query existing NVIDIA driver before installation
+  command: nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+  register: gpu_existing_driver
+  changed_when: false
   failed_when: false
+
+- name: Decide whether the NVIDIA driver package needs to be installed
+  vars:
+    gpu_existing_driver_version: >-
+      {{ (gpu_existing_driver.stdout_lines | default([]) | first | default('', true))
+         | regex_search('[0-9]+\.[0-9]+(?:\.[0-9]+)?') | default('0.0.0', true) }}
+  set_fact:
+    gpu_driver_needs_install: >-
+      {{ gpu_existing_driver.rc | default(1) != 0 or
+         not (gpu_existing_driver_version is version(gpu_driver_min_version, '>=')) }}
+
+# 型号不符不触发重装（重装驱动不会改变型号），由 preflight 的型号断言负责提示。
+- name: Install the NVIDIA driver when needed
+  when: gpu_driver_needs_install | bool
+  block:
+    - name: Install software-properties-common for PPA management
+      apt:
+        name: software-properties-common
+        state: present
+
+    - name: Add NVIDIA graphics drivers PPA
+      apt_repository:
+        repo: "ppa:graphics-drivers/ppa"
+        state: present
+        update_cache: yes
+
+    - name: Install NVIDIA driver package
+      apt:
+        name: "{{ gpu_driver_package }}"
+        state: present
+
+    - name: Hold NVIDIA driver packages to prevent unattended upgrades
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - "{{ gpu_driver_package }}"
+        - "{{ gpu_driver_package | replace('nvidia-driver-', 'nvidia-dkms-') }}"
+      failed_when: false
+
+- name: Report existing NVIDIA driver when installation is skipped
+  debug:
+    msg: >-
+      已检测到满足要求的 NVIDIA 驱动，跳过安装：
+      {{ gpu_existing_driver.stdout | default('', true) | trim }}（要求 >= {{ gpu_driver_min_version }}）
+  when: not (gpu_driver_needs_install | bool)
 
 - name: Query NVIDIA driver after installation
   command: nvidia-smi --query-gpu=driver_version --format=csv,noheader

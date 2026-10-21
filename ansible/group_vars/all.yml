@@ -166,11 +166,11 @@ containerd_package_openEuler: "{{ containerd_package_rpm }}"
 # 启用前需在 inventory 中配置 [gpu] 组
 enable_gpu: "no"
 gpu_driver_install: "no"
+gpu_toolkit_install: "yes"
 gpu_driver_package: "nvidia-driver-580-open"
 gpu_driver_min_version: "525"
 gpu_toolkit_version: ""
-gpu_device_plugin_version: "0.20.0"
-gpu_device_plugin_namespace: "kube-system"
+gpu_verify_device_plugin: "no"
 gpu_smoke_test: "no"
 gpu_expected_model: "4090"
 

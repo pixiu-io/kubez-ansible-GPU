@@ -13,9 +13,9 @@
 | GPU | NVIDIA RTX 4090 24GB（Ada，无 MIG / NVLink / ECC） |
 | Kubernetes | 目标 v1.37.x（示例 v1.37.1）；仓库默认 v1.36.2 |
 | 容器运行时 | containerd 2.x（Kubernetes 1.37 要求 2.0+） |
-| GPU 软件栈 | NVIDIA R580 LTSB + Container Toolkit + k8s-device-plugin |
+| GPU 软件栈 | NVIDIA R580 LTSB + Container Toolkit（宿主机，由本仓库自动化）；k8s-device-plugin 由 pixiu 应用商店安装 |
 
-> 仓库负责 Kubernetes 与主机初始化；GPU 组件可通过 `enable_gpu: "yes"` 自动化（默认关闭，驱动需 `gpu_driver_install: "yes"`），也可按文档手工安装。目标环境，尚未完成实机验证。
+> 仓库负责 Kubernetes 与主机初始化；宿主机驱动/Toolkit/CDI 可通过 `enable_gpu: "yes"` 自动化（默认关闭，驱动需 `gpu_driver_install: "yes"`），也可按文档手工安装。k8s-device-plugin / GPU Operator 由 pixiu 应用商店安装。目标环境，尚未完成实机验证。
 
 ## 镜像地址
 

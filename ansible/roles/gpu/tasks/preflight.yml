@@ -86,28 +86,106 @@
       请先完成 bootstrap-servers/deploy 的 containerd 2.x 安装，或按 docs/install/gpu.md 第 6 章处理。
     success_msg: "containerd 版本检查通过（{{ gpu_containerd_version_number }}）"
 
-- name: Query NVIDIA driver state before deploy
+# 以下检查仅在客户自行安装驱动（gpu_driver_install: "no"）时执行，
+# 分步定位「未安装 / 已装但模块未加载 / 待重启 / nvidia-smi 不可用 / 版本过低 / 型号不符」。
+
+- name: Check whether nvidia-smi is available
+  shell: command -v nvidia-smi
+  register: gpu_nvidia_smi_binary
+  changed_when: false
+  failed_when: false
+  when: not (gpu_driver_install | bool)
+
+- name: Assert nvidia-smi is installed
+  assert:
+    that:
+      - gpu_nvidia_smi_binary.rc | default(1) == 0
+    fail_msg: >-
+      未找到 nvidia-smi，说明 NVIDIA 驱动尚未安装。
+      请客户先在节点上安装驱动（见 docs/install/gpu.md 2.2.1），
+      或在 globals.yml 设置 gpu_driver_install: "yes" 由本仓库安装后重跑部署。
+    success_msg: "nvidia-smi 已安装"
+  when: not (gpu_driver_install | bool)
+
+- name: List loaded kernel modules
+  command: lsmod
+  register: gpu_lsmod
+  changed_when: false
+  failed_when: false
+  when: not (gpu_driver_install | bool)
+
+- name: Record whether an NVIDIA kernel module is loaded
+  set_fact:
+    gpu_nvidia_module_loaded: >-
+      {{ (gpu_lsmod.stdout_lines | default([]) | select('match', '^nvidia') | list | length) > 0 }}
+  when: not (gpu_driver_install | bool)
+
+- name: Assert the NVIDIA kernel module is loaded
+  assert:
+    that:
+      - gpu_nvidia_module_loaded | bool
+    fail_msg: >-
+      驱动已安装但内核模块未加载（lsmod 中无 nvidia* 模块）。
+      请依次排查：是否存在 /var/run/reboot-required（需要重启）；
+      Secure Boot 是否启用且 MOK 未注册（dmesg | grep -i nvidia 若出现 Key was rejected 即为该原因）；
+      nouveau 是否仍占用（lsmod | grep nouveau）；DKMS 是否为当前内核构建（dkms status）。
+      处理完成后重启主机再重跑部署。
+    success_msg: "NVIDIA 内核模块已加载"
+  when: not (gpu_driver_install | bool)
+
+- name: Check whether a reboot is required
+  stat:
+    path: /var/run/reboot-required
+  register: gpu_reboot_required
+  changed_when: false
+  when: not (gpu_driver_install | bool)
+
+- name: Query NVIDIA GPU name and driver version
   command: nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
   register: gpu_nvidia_smi_check
   changed_when: false
   failed_when: false
   when: not (gpu_driver_install | bool)
 
-- name: Assert NVIDIA driver is installed and meets the minimum version
+- name: Assert nvidia-smi runs successfully
+  vars:
+    gpu_nvidia_smi_first_line: "{{ gpu_nvidia_smi_check.stdout_lines | default([]) | first | default('', true) }}"
+  assert:
+    that:
+      - gpu_nvidia_smi_check.rc | default(1) == 0
+    fail_msg: >-
+      nvidia-smi 存在但执行失败（rc={{ gpu_nvidia_smi_check.rc | default('unknown') }}，
+      stderr={{ gpu_nvidia_smi_check.stderr | default('', true) | trim | default('无', true) }}）。
+      {{ '检测到 /var/run/reboot-required，说明驱动安装或内核升级后需要重启。'
+         if gpu_reboot_required.stat.exists | default(false)
+         else '未发现待重启标记。' }}
+      请检查 dmesg | grep -i nvidia 是否有 Key was rejected（Secure Boot/MOK）、
+      lsmod | grep nouveau 是否被 nouveau 占用；必要时重启主机后重试。
+    success_msg: "nvidia-smi 执行正常（{{ gpu_nvidia_smi_first_line }}）"
+  when: not (gpu_driver_install | bool)
+
+- name: Assert the installed NVIDIA driver meets the minimum version
   vars:
     gpu_nvidia_smi_first_line: "{{ gpu_nvidia_smi_check.stdout_lines | default([]) | first | default('', true) }}"
     gpu_current_driver_version: "{{ gpu_nvidia_smi_first_line | regex_search('[0-9]+\\.[0-9]+(?:\\.[0-9]+)?') | default('0.0.0', true) }}"
   assert:
     that:
-      - gpu_nvidia_smi_check.rc | default(1) == 0
       - gpu_current_driver_version is version(gpu_driver_min_version, '>=')
+    fail_msg: >-
+      NVIDIA 驱动版本过低：当前 {{ gpu_current_driver_version }}，要求 >= {{ gpu_driver_min_version }}。
+      请升级驱动（手工安装满足版本的驱动，或设置 gpu_driver_install: "yes" 由本仓库安装）后重跑部署。
+    success_msg: "NVIDIA 驱动版本满足要求（{{ gpu_current_driver_version }}）"
+  when: not (gpu_driver_install | bool)
+
+- name: Assert the installed NVIDIA GPU matches the expected model
+  assert:
+    that:
       - >-
         (gpu_expected_model | string | length) == 0 or
         (gpu_expected_model | lower) in (gpu_nvidia_smi_check.stdout | default('') | lower)
     fail_msg: >-
-      未检测到满足要求的 NVIDIA 驱动（nvidia-smi rc={{ gpu_nvidia_smi_check.rc | default('unknown') }}，
-      驱动版本={{ gpu_current_driver_version }}，要求 >= {{ gpu_driver_min_version }}）。
-      若尚未安装驱动，可在 globals.yml 设置 gpu_driver_install: "yes" 后重跑（随后仍需处理重启/MOK）；
-      若已安装但 nvidia-smi 不可用，请按 docs/install/gpu.md 第 5 章检查内核模块、Secure Boot/MOK 与重启状态。
-    success_msg: "NVIDIA 驱动检查通过（{{ gpu_current_driver_version }}）"
+      GPU 型号不符：期望包含 "{{ gpu_expected_model }}"，实际 nvidia-smi 输出为
+      "{{ gpu_nvidia_smi_check.stdout | default('', true) | trim | default('空', true) }}"。
+      请调整 globals.yml 中的 gpu_expected_model，或将节点从 [gpu] 组移除。
+    success_msg: "GPU 型号检查通过"
   when: not (gpu_driver_install | bool)
