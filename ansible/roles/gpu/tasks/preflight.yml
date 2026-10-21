@@ -1,14 +1,13 @@
 ---
-- name: Assert GPU host runs Ubuntu 22.04 or newer
+- name: Assert GPU host runs Ubuntu
   assert:
     that:
       - ansible_distribution | default('') == "Ubuntu"
-      - ansible_distribution_version | default('0') is version("22.04", ">=")
     fail_msg: >-
-      GPU 自动化仅支持 Ubuntu 22.04 LTS 及以上：当前为
+      GPU 自动化仅支持 Ubuntu：当前为
       {{ ansible_distribution | default('unknown') }} {{ ansible_distribution_version | default('unknown') }}。
-      请将主机升级/重装为 Ubuntu 22.04 LTS，或将主机从 inventory 的 [gpu] 组移除。
-    success_msg: "GPU 主机系统检查通过（Ubuntu {{ ansible_distribution_version | default('unknown') }}）"
+      请将主机重装为 Ubuntu，或将主机从 inventory 的 [gpu] 组移除。
+    success_msg: "GPU 主机系统检查通过（{{ ansible_distribution | default('unknown') }} {{ ansible_distribution_version | default('unknown') }}）"
 
 - name: Install pciutils for GPU discovery
   apt:
