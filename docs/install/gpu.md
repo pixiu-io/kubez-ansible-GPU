@@ -19,7 +19,7 @@
 | 容器运行时 | containerd 2.x | 本仓库按 containerd >= 2.0.0 校验（`containerd_min_version` 默认 `2.0.0`） |
 | Kubernetes | v1.37.x（示例 patch v1.37.1） | 仓库默认 `kube_release: 1.36.2`；实际 patch 以镜像源可用版本为准 |
 | NVIDIA Container Toolkit | ≥1.18（建议 1.20.x） | 需支持 containerd 2.x 的 `version = 3` 配置 |
-| k8s-device-plugin | v0.20.x（示例） | ≥v0.19 已加入 containerd 2.2 支持；以官方 Release 为准 |
+| k8s-device-plugin | v0.20.x（示例） | 由 pixiu 应用商店安装；≥v0.19 已加入 containerd 2.2 支持，以官方 Release 为准 |
 | CNI | Calico | 仓库默认，`cni: "calico"` |
 
 - 表中版本是编写时的目标/示例值，实际安装以 `apt-cache madison`、`apt-cache policy` 或官方仓库列出的版本为准。
@@ -33,13 +33,13 @@
 - 主机初始化：依赖包、停止并禁用 `ufw`、内核模块与 sysctl
 - 容器运行时：Ubuntu 上安装 Docker 仓库的 `containerd.io` 2.x，并下发 `version = 3` 配置（含 `SystemdCgroup`、`enable_cdi`、`pinned_images.sandbox`）
 - Kubernetes 控制面/工作节点（kubeadm）与 CNI（默认 Calico）
-- 可选 `enable_gpu: "yes"`：GPU preflight、Container Toolkit、CDI、RuntimeClass、device plugin、节点容量校验与可选冒烟测试
+- 可选 `enable_gpu: "yes"`：GPU preflight、驱动/Toolkit/CDI、节点标签 `nvidia.com/gpu.present=true`、RuntimeClass `nvidia`、可选节点容量校验与冒烟测试
 - 可选 `gpu_driver_install: "yes"`：NVIDIA 驱动 apt 安装与版本锁定；Secure Boot/MOK 注册与重启仍需人工
 
 仓库不负责：
 
 - CUDA Toolkit（由工作负载镜像自带 runtime）
-- NVIDIA GPU Operator（保留手工/Helm 可选路径）
+- k8s-device-plugin / GPU Operator 的安装（统一由 pixiu 应用商店管理）
 - 驱动或内核升级后的 DKMS 重建、CDI 重新生成
 
 `v3.0.4-gpu` / `v3.0.4-arm64-gpu` 镜像只包含 kubez-ansible 工具链，不包含 GPU 驱动、CUDA 或 NVIDIA 容器运行时。
@@ -146,6 +146,35 @@ nvidia-smi
 
 预期能看到 `NVIDIA GeForce RTX 4090`、`24564MiB`、`450W`，驱动版本 580.x（或至少 525）。`nvidia-smi` 报无法与驱动通信时见第 5 章。
 
+#### 2.2.1 客户自行安装驱动时如何确认安装完成（`gpu_driver_install: "no"`）
+
+客户已自行安装驱动时保持 `gpu_driver_install: "no"`。部署前可在 GPU 节点逐条执行：
+
+```bash
+lspci -nn | grep -i nvidia                 # 能看到 NVIDIA 设备
+command -v nvidia-smi                      # 存在
+lsmod | grep '^nvidia'                     # 模块已加载
+cat /proc/driver/nvidia/version            # 能读到驱动版本
+nvidia-smi                                 # 正常输出，版本 >= 525
+[ -f /var/run/reboot-required ] && echo "待重启" || echo "无需重启"
+dkms status                                # nvidia/<ver>, <当前内核>: installed
+mokutil --sb-state                         # 若启用 Secure Boot，需已注册 MOK
+```
+
+部署时 preflight 会依次校验上述各项：`nvidia-smi` 是否存在、NVIDIA 内核模块是否加载、是否存在待重启标记、`nvidia-smi` 是否可执行、驱动版本是否 >= `gpu_driver_min_version`（默认 525）、GPU 型号是否包含 `gpu_expected_model`。失败信息会明确区分「未安装 / 已安装但内核模块未加载 / 待重启 / nvidia-smi 不可用 / 版本过低 / 型号不符」。
+
+#### 2.2.2 客户已预装 NVIDIA Container Toolkit 时如何确认（`gpu_toolkit_install: "no"`）
+
+客户已预装 Toolkit 时，在 globals.yml 设置 `gpu_toolkit_install: "no"`，部署时只校验/配置，不再执行 apt 安装。部署前可执行：
+
+```bash
+nvidia-ctk --version                                   # 存在且 >=1.18（建议 1.20.x）
+grep -R runtimes.nvidia /etc/containerd/config.toml   # 已配置 runtime 时有输出（为空也可，后续会自动配置）
+nvidia-ctk cdi list                                    # 已生成 CDI 时包含 nvidia.com/gpu=...
+```
+
+若 `nvidia-ctk` 不存在，部署会在 toolkit 阶段明确报错；设置 `gpu_toolkit_install: "yes"` 可交由本仓库安装。
+
 ### 2.3 containerd 2.x
 
 - `bootstrap-servers` 在 `[containerd-master]` / `[containerd-node]` 上安装 Docker 仓库的 `containerd.io` 2.x（可用 `containerd_release` 固定版本），随后安装并校验 `containerd_min_version`（默认 `2.0.0`）。
@@ -205,12 +234,12 @@ cni: "calico"
 image_repository: "registry.cn-hangzhou.aliyuncs.com/google_containers"
 
 enable_gpu: "yes"                     # 总开关，默认 "no"
-gpu_driver_install: "no"              # 已有驱动时保持 "no"
+gpu_driver_install: "no"              # 客户已装驱动时保持 "no"（只校验）
+gpu_toolkit_install: "yes"            # 客户已预装 Toolkit 时设为 "no"
 gpu_driver_package: "nvidia-driver-580-open"
 gpu_toolkit_version: ""               # 留空使用仓库最新版
-gpu_device_plugin_version: "0.20.0"
-gpu_device_plugin_namespace: "kube-system"
-gpu_smoke_test: "no"                  # "yes" 时部署后自动运行 GPU 冒烟 Pod
+gpu_verify_device_plugin: "no"        # 应用商店装好 device plugin 后设为 "yes" 验收容量
+gpu_smoke_test: "no"                  # "yes" 时部署后自动运行 GPU 冒烟 Pod（需先装 device plugin）
 gpu_expected_model: "4090"
 ```
 
@@ -249,11 +278,20 @@ kubectl get nodes -o wide   # 所有节点 Ready
 
 `deploy` 末尾按以下顺序执行（`site.yml` 中 `gpu` 角色，`tags: gpu`）：
 
-1. preflight：校验主机为 Ubuntu（**不校验版本**）、`lspci` 能识别到 `gpu_expected_model`、cgroup v2、containerd >= `containerd_min_version`；未启用自动装驱动时校验现有驱动 >= `gpu_driver_min_version`。
-2. driver（仅 `gpu_driver_install: "yes"`）：MOK 状态提示、添加 PPA、安装并 hold 驱动包。
-3. toolkit：添加官方 apt 源并安装 Toolkit；若 containerd 尚无 `runtimes.nvidia` 则执行 `nvidia-ctk runtime configure --runtime=containerd --set-as-default --cdi.enabled`；生成 `/etc/cdi/nvidia.yaml` 并校验 `nvidia-ctk cdi list`。
-4. device plugin：等待 GPU 节点 Ready、打 `nvidia.com/gpu.present=true` 标签、创建 `nvidia` RuntimeClass、Helm 安装 `nvidia-device-plugin`（带 `runtimeClassName=nvidia`），最后校验节点 `nvidia.com/gpu` 容量大于 0。依赖 master 上的 Helm 与 kubectl（`enable_helm` 默认 `"yes"`）。
-5. verify：见第 3 章。
+1. preflight：校验主机为 Ubuntu（**不校验版本**）、`lspci` 能识别到 `gpu_expected_model`、cgroup v2、containerd >= `containerd_min_version`；客户自装驱动（`gpu_driver_install: "no"`）时按「nvidia-smi 存在 → 内核模块已加载 → 待重启标记 → nvidia-smi 可执行 → 版本 → 型号」分步校验。
+2. driver（仅 `gpu_driver_install: "yes"`）：MOK 状态提示；先探测现有驱动，已达标（>= `gpu_driver_min_version`）则跳过安装；否则添加 PPA、安装并 hold 驱动包。
+3. toolkit：`gpu_toolkit_install: "yes"` 时添加官方 apt 源并安装 Toolkit，`"no"` 时跳过 apt 安装；无论开关如何都会校验 `nvidia-ctk` 是否可用；若 containerd 尚无 `runtimes.nvidia` 则执行 `nvidia-ctk runtime configure --runtime=containerd --set-as-default --cdi.enabled`；生成 `/etc/cdi/nvidia.yaml` 并校验 `nvidia-ctk cdi list`。
+4. cluster-prereqs：等待 GPU 节点 Ready、打 `nvidia.com/gpu.present=true` 标签、创建 `nvidia` RuntimeClass。**本工具不安装任何 Helm chart**；nvidia-device-plugin / GPU Operator 统一由 pixiu 应用商店安装。
+5. verify：宿主栈校验见 3.1；在 pixiu 应用商店安装 device plugin 后，可设置 `gpu_verify_device_plugin: "yes"` 并重跑 `kubez-ansible deploy --tags gpu` 验收 `nvidia.com/gpu` 容量（见 3.2）。
+
+驱动与 Toolkit 开关真值表（`enable_gpu: "yes"` 时生效）：
+
+| `gpu_driver_install` | `gpu_toolkit_install` | 行为 |
+|----------------------|-----------------------|------|
+| `"no"` | `"yes"` | preflight 只校验客户自装驱动（未安装/模块未加载/待重启/版本过低/型号不符分别报错）；由本仓库 apt 安装 Toolkit，并配置 containerd、生成 CDI |
+| `"no"` | `"no"` | preflight 只校验客户自装驱动；toolkit 阶段只校验 `nvidia-ctk` 并配置 containerd、生成 CDI，不执行 apt 安装 |
+| `"yes"` | `"yes"` | 驱动已达标则跳过安装，否则 apt 安装并 hold；随后 apt 安装 Toolkit，并配置 containerd、生成 CDI |
+| `"yes"` | `"no"` | 驱动已达标则跳过安装，否则 apt 安装并 hold；toolkit 阶段只校验客户预装的 `nvidia-ctk`，不执行 apt 安装 |
 
 Toolkit 执行时机见 2.3；已有集群或需要重跑 GPU 步骤时：
 
@@ -261,26 +299,38 @@ Toolkit 执行时机见 2.3；已有集群或需要重跑 GPU 步骤时：
 kubez-ansible -i multinode deploy --tags gpu
 ```
 
-自动化需要访问 NVIDIA Container Toolkit apt 源、device plugin Helm 仓库及对应镜像；离线环境需先配置内网镜像/仓库，或按第 4 章手工部署。
+自动化需要访问 NVIDIA Container Toolkit apt 源；device plugin 所需的 Helm 仓库与镜像由 pixiu 应用商店侧提供。离线环境的内网镜像/仓库需在 pixiu 应用商店侧配置。
 
 ## 3. 验证
 
-自动化验证（`gpu` 角色，`enable_gpu: "yes"`）覆盖：
+### 3.1 宿主栈（本工具自动校验）
+
+`gpu` 角色（`enable_gpu: "yes"`）自动校验：
 
 - `nvidia-smi` 可执行；
 - containerd 版本 >= 2.0.0，配置含 `version = 3` 与 `SystemdCgroup = true`；
-- `nvidia-ctk cdi list` 包含 `nvidia.com/gpu=...`；
-- 节点 `allocatable["nvidia.com/gpu"]` 大于 0；
-- `gpu_smoke_test: "yes"` 时自动运行并清理冒烟 Pod，失败时保留 Pod 供排查。
+- `nvidia-ctk cdi list` 包含 `nvidia.com/gpu=...`。
 
-手工验收：
+手工确认：
 
 ```bash
 nvidia-smi
+nvidia-ctk cdi list
+systemctl is-active containerd
+```
+
+### 3.2 集群侧（应用商店安装 chart 后）
+
+nvidia-device-plugin / GPU Operator 由 pixiu 应用商店安装。确认 DaemonSet Ready 后：
+
+- 设置 `gpu_verify_device_plugin: "yes"` 并重跑 `kubez-ansible -i multinode deploy --tags gpu`，工具会校验每个 GPU 节点 `allocatable["nvidia.com/gpu"]` 大于 0；
+- 或手工确认：
+
+```bash
 kubectl describe node <node> | grep -A2 'nvidia.com/gpu'   # Capacity/Allocatable 为实际卡数
 ```
 
-手工运行 CUDA 测试 Pod（`gpu_smoke_test: "yes"` 可自动完成同等检查）：
+可选冒烟测试（`gpu_smoke_test: "yes"`，需先在应用商店装好 device plugin）：
 
 ```yaml
 apiVersion: v1
@@ -304,7 +354,7 @@ kubectl logs -f gpu-smoke
 kubectl delete pod gpu-smoke
 ```
 
-Pod 应为 `Completed`，日志包含 `NVIDIA GeForce RTX 4090`。申请 `nvidia.com/gpu: 1` 即整卡，4090 不支持小数卡；节点 `Ready` 但容量为 0 时见第 5 章。
+Pod 应为 `Completed`，日志包含 `NVIDIA GeForce RTX 4090`。申请 `nvidia.com/gpu: 1` 即整卡，4090 不支持小数卡；节点 `Ready` 但容量为 0 时见第 5 章。`gpu_smoke_test: "yes"` 时工具会自动运行并清理冒烟 Pod，失败时保留 Pod 供排查。
 
 ## 4. 手工接入（未启用 `enable_gpu`）
 
@@ -328,49 +378,30 @@ sudo nvidia-ctk cdi list   # 预期包含 nvidia.com/gpu=0 / nvidia.com/gpu=all
 
 安装后可执行 `nvidia-ctk --version` 确认 Toolkit 版本 ≥1.18（建议 1.20.x）。混合集群若不想让普通 Pod 走 NVIDIA runtime，去掉 `--set-as-default`，改为创建 handler 为 `nvidia` 的 RuntimeClass，并在工作负载上显式设置 `runtimeClassName: nvidia`。驱动或内核升级、GPU 数量变化后需重新执行 `nvidia-ctk cdi generate`。
 
-### 4.2 NVIDIA device plugin
+### 4.2 NVIDIA device plugin / GPU Operator
 
-在部署节点（已配置 `kubectl` 与 `helm`）执行：
+nvidia-device-plugin 与 GPU Operator 的 chart 统一由 **pixiu 应用商店**安装；本仓库与本文档不再提供 Helm、静态清单等任何 chart 安装方式，避免与部署工具/应用商店形成多入口冲突。
 
-```bash
-kubectl label node <node> nvidia.com/gpu.present=true --overwrite
+安装路径：
 
-helm repo add nvdp https://nvidia.github.io/k8s-device-plugin
-helm repo update
-helm upgrade --install nvidia-device-plugin nvdp/nvidia-device-plugin \
-  --namespace kube-system --create-namespace \
-  --version 0.20.0 --set runtimeClassName=nvidia
-```
+1. 在 pixiu 应用商店选择并安装 `nvidia-device-plugin`（或 `GPU Operator`）；
+2. 确认 chart 的 DaemonSet/工作负载 Ready；
+3. 设置 `gpu_verify_device_plugin: "yes"` 后重跑 `kubez-ansible -i multinode deploy --tags gpu` 验收 `nvidia.com/gpu` 容量（见 3.2）。
 
-静态清单替代（版本按官方 Release 替换）：
-
-```bash
-kubectl create -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.20.0/deployments/static/nvidia-device-plugin.yml
-```
-
-GPU Operator 替代：
-
-```bash
-helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
-helm repo update
-helm install gpu-operator nvidia/gpu-operator \
-  --namespace gpu-operator --create-namespace --set driver.enabled=false
-```
-
-- `driver.enabled=false`：使用宿主机已安装的驱动。
-- 宿主机已装 Toolkit 时通常还需 `--set toolkit.enabled=false`，以实际 Chart 参数为准。
-- 不要与手工安装的 device plugin 并存，二者会争抢同一 socket。
+节点标签 `nvidia.com/gpu.present=true` 与 RuntimeClass `nvidia` 由部署工具的 `cluster-prereqs` 步骤自动创建，无需手工处理。
 
 ## 5. 故障排查
 
 | 现象 | 可能原因 | 处理 |
 |------|----------|------|
 | `nvidia-smi` 报无法与驱动通信 | Secure Boot 未注册 MOK；驱动未加载；nouveau 占用；DKMS 未为新内核构建 | `mokutil --sb-state`、`dmesg \| grep -i nvidia`、`lsmod \| grep nouveau`、`dkms status`；按 2.2 处理 |
+| `nvidia-smi` 存在但执行失败（模块未加载） | 驱动安装/内核升级后未重启；Secure Boot 未注册 MOK；nouveau 占用；DKMS 未为当前内核构建 | `[ -f /var/run/reboot-required ]`、`lsmod \| grep '^nvidia'`、`dmesg \| grep -i nvidia`、`dkms status`；按 2.2.1 处理 |
+| 未找到 `nvidia-ctk` | NVIDIA Container Toolkit 未安装（客户预装场景下开关为 `"no"`） | `command -v nvidia-ctk`；按 2.2.2 安装，或设置 `gpu_toolkit_install: "yes"` 交由本仓库安装 |
 | 内核升级后 GPU 不可用 | DKMS 模块未为新内核重建 | 重启回旧内核，或 `sudo dpkg-reconfigure nvidia-dkms-580-open`，确认 `dkms status` 后重启 |
 | `dmesg` 出现 `Key was rejected by service` | Secure Boot 拒绝未签名模块 | 完成 MOK 注册或关闭 Secure Boot（2.2） |
 | kubelet `CrashLoopBackOff` | containerd 版本不足；cgroup v1；配置仍是 version=2；sandbox 不匹配 | `containerd --version`、`stat -fc %T /sys/fs/cgroup/`、检查 config.toml，按 2.3 处理 |
 | kubelet 日志报 CRI 连接失败 | containerd 未启动或 socket 路径不符 | `systemctl status containerd`；确认 kubelet 使用 `/run/containerd/containerd.sock` |
-| Pod `Pending`，事件 `Insufficient nvidia.com/gpu` | device plugin 未运行；节点未打标签；容量为 0 | 检查 4.2 或 `enable_gpu` 自动化状态；`kubectl describe node` 看 Capacity |
+| Pod `Pending`，事件 `Insufficient nvidia.com/gpu` | device plugin 未运行；节点未打标签；容量为 0 | 先在 pixiu 应用商店安装/检查 nvidia-device-plugin（或 GPU Operator）并确认 DaemonSet Ready；节点标签由部署工具自动打；`kubectl describe node` 看 Capacity |
 | Pod `Pending`，提示无可用节点 | 节点缺少 `nvidia.com/gpu.present=true` 标签 | `kubectl get nodes --show-labels` |
 | Pod 运行但 `nvidia-smi` 报错 | Toolkit 配置被 bootstrap 覆盖；CDI 未生成；device plugin 未注入 | 重跑 4.1 并重启 containerd；删除并重建 Pod |
 | `nvidia-ctk cdi list` 为空 | 驱动未加载；CDI 未生成 | `nvidia-smi` 确认驱动；重新 `nvidia-ctk cdi generate` |
@@ -396,7 +427,7 @@ kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
 
 ```bash
 kubectl delete pod gpu-smoke --ignore-not-found
-helm uninstall nvidia-device-plugin -n kube-system
+# 在 pixiu 应用商店卸载 nvidia-device-plugin / GPU Operator（本工具不负责 chart 卸载）
 kubectl label node <node> nvidia.com/gpu.present-
 kubectl delete runtimeclass nvidia --ignore-not-found
 ```

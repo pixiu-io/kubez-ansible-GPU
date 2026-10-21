@@ -63,6 +63,33 @@
       并确认 containerd 配置已启用 CDI 后重跑。
     success_msg: "CDI 设备校验通过"
 
+# device plugin 由 pixiu 应用商店安装；安装完成后再用该开关验收节点容量。
+- name: Read nvidia.com/gpu allocatable on GPU nodes
+  command: "kubectl get node {{ item }} -o jsonpath='{.status.allocatable.nvidia\\.com/gpu}'"
+  loop: "{{ groups['gpu'] }}"
+  register: gpu_allocatable
+  changed_when: false
+  failed_when: false
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+  when: gpu_verify_device_plugin | bool
+
+- name: Assert every GPU node advertises nvidia.com/gpu capacity
+  assert:
+    that:
+      - item.stdout | default('', true) | trim | int > 0
+    fail_msg: >-
+      节点 {{ item.item }} 的 allocatable["nvidia.com/gpu"] 为
+      "{{ item.stdout | default('', true) | trim | default('空', true) }}"（需大于 0）。
+      本部署工具不安装 device plugin chart，请先在 pixiu 应用商店安装 nvidia-device-plugin
+      （或 GPU Operator），确认 DaemonSet Ready 后设置 gpu_verify_device_plugin: "yes"
+      并重跑 kubez-ansible deploy --tags gpu 验收容量。
+  loop: "{{ gpu_allocatable.results }}"
+  run_once: true
+  when: gpu_verify_device_plugin | bool
+
 - name: Create GPU smoke test manifest on the first master
   copy:
     dest: /tmp/nvidia-gpu-smoke-test.yaml
@@ -132,7 +159,8 @@
       （当前 phase={{ gpu_smoke_phase.stdout | default('', true) | trim | default('Unknown', true) }}）。
       请执行 kubectl -n default describe pod nvidia-gpu-smoke-test 与
       kubectl -n default logs nvidia-gpu-smoke-test 排查；若长时间 Pending，
-      请检查节点 allocatable 中的 nvidia.com/gpu 是否大于 0。
+      请检查节点 allocatable 中的 nvidia.com/gpu 是否大于 0，
+      并确认已在 pixiu 应用商店安装 device plugin。
   run_once: true
   when: gpu_smoke_test | bool
 
@@ -160,6 +188,7 @@
       {{ gpu_smoke_logs.stdout | default('', true) | trim | default('空', true) }}。
       请进一步执行 kubectl -n default describe pod nvidia-gpu-smoke-test 查看事件，
       并检查 device plugin 是否分配 GPU、containerd nvidia runtime/CDI 配置是否正确。
+      请确认已在 pixiu 应用商店安装 device plugin。
       Pod 已保留在 default 命名空间便于排查，处理后可执行
       kubectl -n default delete pod nvidia-gpu-smoke-test 删除。
   run_once: true

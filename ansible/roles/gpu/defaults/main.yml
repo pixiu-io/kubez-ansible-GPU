@@ -1,14 +1,17 @@
 ---
 # GPU 自动化总开关，默认关闭；启用前需在 inventory 中配置 [gpu] 组
 enable_gpu: "no"
-# 是否由本角色安装 NVIDIA 驱动；已有驱动的节点保持 "no"
+# 是否由本角色安装 NVIDIA 驱动；"no" 表示客户自行安装，preflight 只校验驱动是否就绪
 gpu_driver_install: "no"
+# 是否由本角色安装 NVIDIA Container Toolkit；客户已预装 Toolkit 时设为 "no"（只校验/配置，不安装）
+gpu_toolkit_install: "yes"
 gpu_driver_package: "nvidia-driver-580-open"
 gpu_driver_min_version: "525"
 containerd_min_version: "2.0.0"
 gpu_toolkit_version: ""
-gpu_device_plugin_version: "0.20.0"
-gpu_device_plugin_namespace: "kube-system"
+# 验收 nvidia.com/gpu 容量；device plugin 由 pixiu 应用商店安装后再开启
+gpu_verify_device_plugin: "no"
+# 是否运行 GPU 冒烟测试；需先在 pixiu 应用商店安装 device plugin 后再开启
 gpu_smoke_test: "no"
 gpu_expected_model: "4090"
 gpu_smoke_image: "nvidia/cuda:12.8.1-base-ubuntu22.04"

@@ -1,0 +1,65 @@
+---
+- name: Assert kube-master group is defined
+  assert:
+    that:
+      - groups['kube-master'] | default([]) | length > 0
+    fail_msg: >-
+      inventory 中未找到 kube-master 组，无法准备 GPU 集群前置条件。
+      请先完成 Kubernetes 集群部署（kubez-ansible deploy）。
+  run_once: true
+
+- name: Check kubectl availability on the first master
+  shell: command -v kubectl
+  register: gpu_kubectl_binary
+  changed_when: false
+  failed_when: false
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+
+- name: Assert kubectl is available on the first master
+  assert:
+    that:
+      - gpu_kubectl_binary.rc | default(1) == 0
+    fail_msg: >-
+      GPU 集群前置条件需要 master 上的 kubectl：未找到，请先完成 kubez-ansible deploy。
+  run_once: true
+
+- name: Wait for GPU nodes to be Ready
+  command: kubectl wait --for=condition=Ready node/{{ item }} --timeout=300s
+  loop: "{{ groups['gpu'] }}"
+  changed_when: false
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+
+- name: Label GPU nodes for the NVIDIA device plugin
+  command: kubectl label node {{ item }} nvidia.com/gpu.present=true --overwrite
+  loop: "{{ groups['gpu'] }}"
+  changed_when: false
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+
+- name: Copy NVIDIA RuntimeClass manifest to the first master
+  copy:
+    dest: /tmp/nvidia-runtimeclass.yaml
+    mode: '0644'
+    content: |
+      apiVersion: node.k8s.io/v1
+      kind: RuntimeClass
+      metadata:
+        name: nvidia
+      handler: nvidia
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
+
+- name: Apply NVIDIA RuntimeClass
+  command: kubectl apply -f /tmp/nvidia-runtimeclass.yaml
+  register: gpu_runtimeclass_apply
+  changed_when: "'created' in gpu_runtimeclass_apply.stdout or 'configured' in gpu_runtimeclass_apply.stdout"
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['kube-master'][0] }}"
+  run_once: true
